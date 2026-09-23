@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from harness.evaluators import AgentProcessEvaluator
+from harness.executors import InProcessAgentExecutor
 from harness.gate import GateEngine
 from harness.models import (
     CandidateSpec,
@@ -214,6 +215,68 @@ class HarnessStoreTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.status, "infra_error")
         self.assertEqual(result.overall_score, 0.0)
+
+    def test_agent_error_info_is_classified_as_infrastructure_error(self):
+        class _SkillsManager:
+            class _Overlay:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def candidate_overlay(self, _skills):
+                return self._Overlay()
+
+        class _Orchestrator:
+            skills_manager = _SkillsManager()
+
+            async def process(self, **_kwargs):
+                return {
+                    "answer": "降级回答",
+                    "error_info": "RAG检索失败: embedding endpoint unavailable",
+                    "latency_ms": 12,
+                }
+
+        executor = InProcessAgentExecutor(_Orchestrator())
+        result = asyncio.run(executor.execute(
+            EvalCase(case_id="infra", input={"query": "查询订单"}),
+            candidate=None,
+            run_id="run_infra",
+            repetition=1,
+        ))
+
+        self.assertEqual(result.status, EvaluationStatus.INFRA_ERROR)
+        self.assertIn("embedding endpoint unavailable", result.error)
+
+    def test_agent_success_keeps_non_null_error_field(self):
+        class _SkillsManager:
+            class _Overlay:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def candidate_overlay(self, _skills):
+                return self._Overlay()
+
+        class _Orchestrator:
+            skills_manager = _SkillsManager()
+
+            async def process(self, **_kwargs):
+                return {"answer": "成功回答", "latency_ms": 10}
+
+        executor = InProcessAgentExecutor(_Orchestrator())
+        result = asyncio.run(executor.execute(
+            EvalCase(case_id="success", input={"query": "查询订单"}),
+            candidate=None,
+            run_id="run_success",
+            repetition=1,
+        ))
+
+        self.assertEqual(result.status, EvaluationStatus.SUCCESS)
+        self.assertEqual(result.error, "")
 
     def test_skill_snapshot_restores_pre_merge_content(self):
         old_dir = skills_module.SKILLS_DIR
