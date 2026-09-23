@@ -132,6 +132,7 @@ class ExecutionResult:
     tokens: int = 0
     cost: float = 0.0
     error: str = ""
+    usage_available: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -239,6 +240,7 @@ class GatePolicy:
     max_quality_drop: float = 0.0
     max_latency_ratio: float = 1.15
     max_cost_ratio: float = 1.20
+    require_usage_metrics: bool = False
     min_cases: int = 1
     require_clean_git: bool = False
     required_metrics: List[str] = field(default_factory=lambda: [

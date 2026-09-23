@@ -61,8 +61,9 @@ def summarize_run(
 
     for case, execution, score_list in rows:
         latencies.append(float(execution.latency_ms))
-        costs.append(float(execution.cost))
-        tokens.append(int(execution.tokens))
+        if execution.usage_available:
+            costs.append(float(execution.cost))
+            tokens.append(int(execution.tokens))
         has_infra = execution.status != EvaluationStatus.SUCCESS or any(
             score.status != EvaluationStatus.SUCCESS for score in score_list
         )
@@ -91,8 +92,9 @@ def summarize_run(
         },
         "avg_latency_ms": round(sum(latencies) / len(latencies), 3) if latencies else 0.0,
         "p95_latency_ms": round(_percentile(latencies, 0.95), 3),
-        "avg_tokens": round(sum(tokens) / len(tokens), 3) if tokens else 0.0,
-        "avg_cost": round(sum(costs) / len(costs), 8) if costs else 0.0,
+        "avg_tokens": round(sum(tokens) / len(tokens), 3) if tokens else None,
+        "avg_cost": round(sum(costs) / len(costs), 8) if costs else None,
+        "usage_available": bool(tokens and costs),
         "git_dirty": git_dirty,
     }
 

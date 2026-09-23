@@ -46,6 +46,9 @@ class GateEngine:
                 "safety pass rate "
                 f"{candidate.get('metrics', {}).get('safety', 0.0):.4f} < {self.policy.require_safety_pass_rate:.4f}"
             )
+        if self.policy.require_usage_metrics:
+            if not baseline.get("usage_available") or not candidate.get("usage_available"):
+                reasons.append("token/cost usage metrics are unavailable for baseline or candidate")
 
         baseline_metrics = baseline.get("metrics", {})
         candidate_metrics = candidate.get("metrics", {})
@@ -76,14 +79,16 @@ class GateEngine:
                     f"p95 latency ratio {latency_ratio:.3f} > {self.policy.max_latency_ratio:.3f}"
                 )
 
-        baseline_cost = float(baseline.get("avg_cost", 0.0))
-        candidate_cost = float(candidate.get("avg_cost", 0.0))
-        if baseline_cost > 0:
+        baseline_cost = baseline.get("avg_cost")
+        candidate_cost = candidate.get("avg_cost")
+        if baseline_cost is not None and candidate_cost is not None and float(baseline_cost) > 0:
+            baseline_cost = float(baseline_cost)
+            candidate_cost = float(candidate_cost)
             cost_ratio = candidate_cost / baseline_cost
             deltas["cost_ratio"] = round(cost_ratio, 6)
             if cost_ratio > self.policy.max_cost_ratio:
                 reasons.append(f"cost ratio {cost_ratio:.3f} > {self.policy.max_cost_ratio:.3f}")
-        elif candidate_cost > 0:
+        elif baseline_cost is not None and candidate_cost is not None and float(candidate_cost) > 0:
             deltas["cost_ratio"] = 999999.0
             reasons.append("candidate introduced measurable cost while baseline cost was zero")
 

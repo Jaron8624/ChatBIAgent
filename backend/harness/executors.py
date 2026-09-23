@@ -62,12 +62,20 @@ class InProcessAgentExecutor:
         latency_ms = (time.perf_counter() - started) * 1000
         error_info = str(output.get("error_info") or "").strip()
         status = EvaluationStatus.INFRA_ERROR if error_info else EvaluationStatus.SUCCESS
+        raw_tokens = output.get("tokens_consumed")
+        raw_cost = output.get("estimated_cost")
+        usage_available = bool(
+            output.get("usage_available")
+            or (raw_tokens not in (None, 0))
+            or (raw_cost not in (None, 0))
+        )
         return ExecutionResult(
             output=output,
             trace={"trace_id": output.get("trace_id"), "spans": output.get("spans", [])},
             status=status,
             error=error_info,
             latency_ms=float(output.get("latency_ms", latency_ms)),
-            tokens=int(output.get("tokens_consumed", 0)),
-            cost=float(output.get("estimated_cost", 0.0)),
+            tokens=int(raw_tokens or 0),
+            cost=float(raw_cost or 0.0),
+            usage_available=usage_available,
         )

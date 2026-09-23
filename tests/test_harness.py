@@ -41,6 +41,7 @@ class FakeExecutor:
             latency_ms=120 if bad else 100,
             tokens=120,
             cost=0.01,
+            usage_available=True,
         )
 
 
@@ -108,6 +109,19 @@ class HarnessStoreTests(unittest.TestCase):
         )
         self.assertEqual(decision.decision, GateDecisionType.REJECT)
         self.assertTrue(any("judge_overall" in reason for reason in decision.reasons))
+
+    def test_gate_rejects_unavailable_usage_when_required(self):
+        policy = GatePolicy(require_usage_metrics=True)
+        decision = GateEngine(policy).decide(
+            "exp-usage",
+            "cand-usage",
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0,
+             "infra_errors": 0, "metrics": {}, "usage_available": False},
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0,
+             "infra_errors": 0, "metrics": {}, "usage_available": False},
+        )
+        self.assertEqual(decision.decision, GateDecisionType.REJECT)
+        self.assertTrue(any("usage metrics" in reason for reason in decision.reasons))
 
     def test_runner_compares_same_dataset_and_blocks_regression(self):
         dataset_version = self.store.register_dataset("core", [EvalCase(

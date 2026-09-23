@@ -79,6 +79,7 @@ class HarnessService:
             max_quality_drop=float(os.getenv("HARNESS_MAX_QUALITY_DROP", "0")),
             max_latency_ratio=float(os.getenv("HARNESS_MAX_LATENCY_RATIO", "1.15")),
             max_cost_ratio=float(os.getenv("HARNESS_MAX_COST_RATIO", "1.20")),
+            require_usage_metrics=os.getenv("HARNESS_REQUIRE_USAGE_METRICS", "true").lower() in ("1", "true", "yes"),
             require_clean_git=os.getenv("HARNESS_REQUIRE_CLEAN_GIT", "false").lower() in ("1", "true", "yes"),
             required_metrics=required_metrics,
         )
