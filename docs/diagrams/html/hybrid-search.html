@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>混合检索全链路</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1180px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 26px; }
+  .row { display: flex; align-items: stretch; gap: 14px; }
+  .col { display: flex; flex-direction: column; gap: 14px; }
+  .card {
+    background: #fff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 15px 20px; box-shadow: 4px 4px 0 #bfdbfe;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.red { border-color: #ef4444; box-shadow: 4px 4px 0 #fecaca; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 18px; margin-bottom: 7px; color: #1e293b; }
+  .card p { font-size: 14px; color: #475569; line-height: 1.7; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: #be185d; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 7px; font-weight: 600; }
+  .green .tag { background: #ecfdf5; color: #059669; }
+  .orange .tag { background: #fffbeb; color: #d97706; }
+  .purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .red .tag { background: #fef2f2; color: #dc2626; }
+  .gray .tag { background: #f8fafc; color: #475569; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2563eb; font-weight: 700; flex-shrink: 0; }
+  .arrow-v { text-align: center; font-size: 22px; color: #2563eb; font-weight: 700; padding: 5px 0; }
+  .section-title { font-size: 15px; font-weight: 700; color: #1e3a8a; background: #dbeafe; display: inline-block; padding: 3px 14px; border-radius: 999px; margin-bottom: 10px; width: fit-content; }
+  .mt { margin-top: 18px; }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 14px 22px; margin-top: 22px; font-size: 15.5px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+  .fallback { border-left: 4px dashed #ef4444; padding: 8px 14px; font-size: 13px; color: #b91c1c; background: #fef2f2; border-radius: 0 10px 10px 0; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>混合检索全链路：双路召回 → RRF 融合 → Rerank 精排</h1>
+  <div class="sub">以 Schema 检索为例：Query 同时包含"模糊口语"与"精确术语"，单一路线都有盲区，必须两路互补</div>
+
+  <div class="section-title">主链路</div>
+  <div class="row">
+    <div class="card gray" style="width: 180px; align-self: center;">
+      <span class="tag">输入</span>
+      <h3>用户 Query</h3>
+      <p>"olist 的差评率"</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="col" style="flex: 1;">
+      <div class="card">
+        <span class="tag">路 A · 稠密向量</span>
+        <h3>Embedding 语义检索</h3>
+        <p>bge-m3 编码查询 → HNSW 近似最近邻<br>擅长<b>语义泛化</b>："差评率" ↔ "review_score≤2 的占比"</p>
+      </div>
+      <div class="card green">
+        <span class="tag">路 B · 稀疏关键词</span>
+        <h3>BM25 精确匹配</h3>
+        <p>中文 2-gram + 英文标识符分词<br>擅长<b>精确术语</b>："olist"、表名、字段名一字不差</p>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card orange" style="width: 225px; align-self: center;">
+      <span class="tag">融合</span>
+      <h3>RRF 排名融合</h3>
+      <p><code>1/(60+rank)</code><br>只用排名不用分数<br>奖励"两路都认可"的候选</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card purple" style="width: 225px; align-self: center;">
+      <span class="tag">精排</span>
+      <h3>Rerank 交叉编码</h3>
+      <p>query 与候选一起进模型<br>慢但准，只对 Top-K 候选使用</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card green" style="width: 190px; align-self: center;">
+      <span class="tag">产出</span>
+      <h3>最小充分证据</h3>
+      <p>指标口径 + Schema + Join 路径，注入 Prompt</p>
+    </div>
+  </div>
+
+  <div class="mt"></div>
+  <div class="section-title">降级路径：优先保证可用性，再追求精确性</div>
+  <div class="row">
+    <div class="card red" style="flex: 1;">
+      <span class="tag">混合检索失败</span>
+      <p>回退为<b>只用稠密向量</b>检索（单路仍可用）</p>
+    </div>
+    <div class="card red" style="flex: 1;">
+      <span class="tag">Rerank 失败</span>
+      <p>直接用 <b>RRF 融合结果</b>输出（不精排仍可用）</p>
+    </div>
+    <div class="card red" style="flex: 1;">
+      <span class="tag">Embedding 服务故障</span>
+      <p>回退<b>纯 BM25</b> 关键词检索（无向量仍可用）</p>
+    </div>
+  </div>
+  <div class="fallback">工程原则：每个"增强组件"的异常都必须被捕获并回退——Rerank 调用包在 try/except 里，超时或返回格式异常时记日志、用 RRF 结果继续。用户感知到的只是"这次结果排序略糙"，而不是报错。</div>
+
+  <div class="key">一句话总结：<b>召回阶段放大 K 保覆盖（宁多勿漏），精排阶段收敛保精确</b>——先捞全，再选准；任何一层增强挂了，都有更朴素但可靠的上一层兜底。</div>
+</body>
+</html>

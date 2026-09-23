@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>单存储引擎 vs 双存储引擎</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 20px; }
+.cols { display: flex; gap: 20px; justify-content: center; max-width: 1060px; margin: 0 auto; }
+.col { flex: 1; max-width: 500px; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.col h2 { font-size: 15px; text-align: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px dashed #d1d5db; }
+.col.win { border-color: #86efac; }
+.col.win h2 { color: #166534; }
+.col h2 { color: #92400e; }
+.layer { border: 1.2px solid #d1d5db; border-radius: 8px; padding: 8px; margin-bottom: 8px; text-align: center; font-size: 12px; }
+.layer.app { background: #eff6ff; border-color: #93c5fd; color: #1e40af; }
+.layer.db { background: #f0fdf4; border-color: #86efac; color: #166534; }
+.layer.es { background: #fef3c7; border-color: #fbbf24; color: #92400e; }
+.layer .s { font-size: 10.5px; color: #6b7280; }
+.two { display: flex; gap: 8px; }
+.two .layer { flex: 1; }
+.arr { text-align: center; color: #9ca3af; font-size: 15px; margin: 2px 0; }
+.pros { font-size: 11.5px; margin-top: 8px; line-height: 1.6; }
+.pros b { color: #111827; }
+.pros .good { color: #166534; }
+.pros .bad { color: #991b1b; }
+.verdict { max-width: 1060px; margin: 16px auto 0; background: #f0fdf4; border: 1.2px solid #86efac; border-radius: 10px; padding: 12px 16px; font-size: 12.5px; color: #166534; }
+</style>
+</head>
+<body>
+
+<h1>混合检索的两种存储组织方式</h1>
+<p class="sub">向量检索 + 关键词检索，放在一套系统里还是两套系统里？</p>
+
+<div class="cols">
+
+<div class="col win">
+  <h2>✅ 单存储引擎（本项目方案）</h2>
+  <div class="layer app">应用层：一次 hybrid_search 请求<div class="s">稠密向量 + 稀疏向量 两路 AnnSearchRequest</div></div>
+  <div class="arr">▼</div>
+  <div class="layer db">Milvus（一套系统）<div class="s">稠密：HNSW + COSINE ｜ 稀疏：SPARSE_INVERTED_INDEX + BM25（内置 Function 自动生成）｜ 融合：RRFRanker</div></div>
+  <div class="pros">
+    <b class="good">优点：</b>部署一个组件、无跨系统一致性问题、融合由引擎内完成<br>
+    <b class="bad">缺点：</b>两路配置耦合，不能独立调优/扩缩容<br>
+    <b>适配场景：</b>万级文档/记忆规模，运维简单的收益 >> 独立调优的收益
+  </div>
+</div>
+
+<div class="col">
+  <h2>双存储引擎</h2>
+  <div class="layer app">应用层：分别查询 + 自行归并结果<div class="s">一致性、归并逻辑都要自己维护</div></div>
+  <div class="arr">▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▼</div>
+  <div class="two">
+    <div class="layer db">Milvus<div class="s">只管稠密向量召回</div></div>
+    <div class="layer es">Elasticsearch<div class="s">只管 BM25 关键词召回</div></div>
+  </div>
+  <div class="pros">
+    <b class="good">优点：</b>两路独立优化、独立扩缩容（关键词压力大单独给 ES 加节点）<br>
+    <b class="bad">缺点：</b>两套系统运维、双写一致性、结果归并逻辑自维护<br>
+    <b>适配场景：</b>千万级以上语料、两路负载差异悬殊的大厂场景
+  </div>
+</div>
+
+</div>
+
+<div class="verdict">
+<b>选型结论：</b>当前数据量（万级）选单存储引擎——Milvus 一站搞定稠密 + BM25 稀疏 + RRF 融合。另有零依赖降级方案：纯 Python 实现 BM25 + 字符 n-gram 向量 + RRF（无 Milvus 环境可用），接口保持一致，部署 Milvus 后可直接替换 dense 实现，上层逻辑不变。
+</div>
+
+</body>
+</html>

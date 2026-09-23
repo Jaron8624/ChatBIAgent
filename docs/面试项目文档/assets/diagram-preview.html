@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NexusMind 面试图解 · 讲实现版</title>
+<style>
+:root { --ink:#1d2740; --muted:#5c6880; --blue:#3f63f0; --bluebg:#f2f5ff; --green:#1f9e77; --greenbg:#effbf6; --orange:#e8890c; --orangebg:#fff7ea; --red:#e0564f; --redbg:#fff3f2; --purple:#7a4fd6; --purplebg:#f6f2ff; --line:#dde4f2; }
+*{box-sizing:border-box}
+body{margin:0;background:#eef1f8;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.card{width:1440px;min-height:810px;padding:50px 64px;background:#fff;position:relative;overflow:hidden;display:flex;flex-direction:column}
+.eyebrow{color:var(--blue);font-size:20px;font-weight:800;letter-spacing:1px;margin-bottom:8px}
+.title{font-size:40px;line-height:1.25;margin:0 0 10px;font-weight:800}
+.subtitle{font-size:19px;color:var(--muted);margin:0 0 30px;line-height:1.5;max-width:1180px}
+.row{display:flex;gap:16px;align-items:stretch}
+.box{border:2px solid var(--line);border-radius:16px;padding:18px 20px;flex:1;display:flex;flex-direction:column}
+.box h4{margin:0 0 10px;font-size:21px}
+.box p{margin:0;font-size:15.5px;color:var(--muted);line-height:1.5}
+.box .ex{margin-top:10px;font-size:14.5px;line-height:1.45;color:#3c4660;background:#f7f9fd;border-radius:10px;padding:8px 12px}
+.box.blue{border-color:#b4c4ff;background:var(--bluebg)} .box.blue .ex{background:#fff}
+.box.green{border-color:#a4dfc9;background:var(--greenbg)} .box.green .ex{background:#fff}
+.box.orange{border-color:#ffd79a;background:var(--orangebg)} .box.orange .ex{background:#fff}
+.box.red{border-color:#ffb1ae;background:var(--redbg)} .box.red .ex{background:#fff}
+.box.purple{border-color:#d4c2ff;background:var(--purplebg)} .box.purple .ex{background:#fff}
+.arrow{align-self:center;font-size:34px;color:#8a94ad;font-weight:600;padding:0 2px}
+.band{margin-top:18px;border-radius:14px;padding:14px 20px;font-size:18px;font-weight:700;line-height:1.5}
+.band.blue{background:linear-gradient(90deg,#3f63f0,#6d85f7);color:#fff}
+.band.plain{background:#f3f6fc;color:#33415e;border:1.5px dashed #b9c6e6}
+.footer{margin-top:auto;padding-top:16px;color:#8a94ad;font-size:14px}
+.step{display:flex;flex-direction:column;gap:10px;flex:1}
+.mini{border:1.5px solid var(--line);border-radius:12px;padding:12px 14px;background:#fff;font-size:15.5px;font-weight:700;line-height:1.4}
+.mini small{display:block;margin-top:5px;font-size:13.5px;color:var(--muted);font-weight:500;line-height:1.45}
+.ttl{font-size:22px;font-weight:800;margin:0 0 12px}
+.chip{display:inline-block;background:#fff;border:1.5px solid var(--line);border-radius:999px;padding:6px 13px;font-size:14px;font-weight:700;margin:4px 5px 4px 0}
+.pile{display:flex;flex-direction:column;gap:10px}
+.layer{border-radius:13px;padding:13px 16px;border:2px solid;font-size:16px;font-weight:700;line-height:1.35}
+.layer small{display:block;font-size:13.5px;font-weight:500;color:var(--muted);margin-top:4px;line-height:1.45}
+.l1{border-color:#a4dfc9;background:var(--greenbg)} .l2{border-color:#b4c4ff;background:var(--bluebg)} .l3{border-color:#ffd79a;background:var(--orangebg)} .l4{border-color:#d4c2ff;background:var(--purplebg)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.note{border-left:5px solid var(--orange);background:#fffaf0;color:#6d5222;font-size:15.5px;line-height:1.5;padding:10px 14px;border-radius:8px;margin-top:16px}
+</style>
+</head>
+<body>
+
+<!-- 01 意图识别 -->
+<section class="card" id="d01">
+  <div class="eyebrow">01 · 意图识别与路由</div>
+  <h1 class="title">用户开口第一句，系统怎么听懂他想要啥？</h1>
+  <p class="subtitle">三路“翻译官”同时上阵：规则像老会计认死理，LLM 像机灵实习生会意会，历史模式像秘书记得你上次说过啥。最后按业务优先级拍板。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 规则识别（秒判）</h4><p>关键词命中就出结果，快、稳、不要钱</p><div class="ex">听到“为什么…下降/暴涨” → 直接判根因分析</div></div>
+    <div class="arrow">＋</div>
+    <div class="box green"><h4>② LLM 识别（兜住怪话）</h4><p>规则不认识的口语、绕弯子，交给模型理解</p><div class="ex">“帮我瞅瞅哪个品类拖了后腿” → 判根因分析</div></div>
+    <div class="arrow">＋</div>
+    <div class="box orange"><h4>③ 历史模式（多轮补全）</h4><p>用户说“那上个月呢”，翻上一轮意图接着用</p><div class="ex">上轮在查销售额 → 这轮补全为“查上个月销售额”</div></div>
+  </div>
+  <div class="band blue">仲裁规则：根因分析优先级最高 → 数据查询 → 知识问答 → 闲聊兜底</div>
+  <div class="band plain">为什么不全让 LLM 判？→ 每次都调模型：慢、贵、还可能“今天判成 A 明天判成 B”</div>
+  <div class="footer">一句话记忆：规则管快的，LLM 管活的，历史管接话的，优先级管谁说了算。</div>
+</section>
+
+<!-- 02 MCP -->
+<section class="card" id="d02">
+  <div class="eyebrow">02 · MCP 工具协议</div>
+  <h1 class="title">Agent 想用工具，总不能把说明书全塞脑子里吧？</h1>
+  <p class="subtitle">MCP 就像给工具装了个“标准插座”：Agent 不关心工具内部长啥样，只问三件事——你有啥工具？参数怎么填？调用结果是什么？</p>
+  <div class="row">
+    <div class="box blue"><h4>① 握手 initialize</h4><p>先对暗号：报版本、交换能力，确认“咱俩能对话”</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② 发现 tools/list</h4><p>工具自报家门：名字、干什么、参数格式（JSON Schema）</p><div class="ex">retrieve_schema_context(问题) → 返回相关表和字段</div></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 挑选 rerank</h4><p>工具太多时先按问题筛一遍，只把最相关的给模型看</p></div>
+    <div class="arrow">→</div>
+    <div class="box purple"><h4>④ 调用 tools/call</h4><p>填参数 → 服务端校验 → 执行 → 返回结构化结果</p></div>
+  </div>
+  <div class="band plain">内部工具（查数据、编译指标）和外部工具（第三方服务）走同一套协议，新增工具不用改 Agent 主流程</div>
+  <div class="band blue">好处：模型能力 ≠ 工具能力，插座标准化后，换模型、加工具互不耽误</div>
+  <div class="footer">一句话记忆：先握手、再发现、挑着用、调完拿结果——和点外卖一个流程。</div>
+</section>
+
+<!-- 03 ReAct -->
+<section class="card" id="d03">
+  <div class="eyebrow">03 · ReAct 取证循环</div>
+  <h1 class="title">复杂问题一次猜不准？那就“边看边查，查完再想”</h1>
+  <p class="subtitle">问题：“哪个品类差评率最高，为啥？”——表名、字段、过滤条件都不是一次能猜全的。ReAct 把它拆成循环：想一步 → 查一步 → 看结果 → 再想。</p>
+  <div class="row">
+    <div class="box blue"><h4>Thought 想一想</h4><p>“我得先看看评价表长啥样、有没有品类字段”</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>Action 动手查</h4><p>调用 Schema 检索工具 / 执行一条探查 SQL</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>Observation 看结果</h4><p>“哦，差评在 reviews 表，品类要 Join 三张表才能拿到”</p></div>
+    <div class="arrow">↺</div>
+    <div class="box purple"><h4>循环 / 收手</h4><p>信息够了就出最终 SQL 和结论，不够再来一轮</p></div>
+  </div>
+  <div class="band plain">三道保险丝：调用签名去重（同一工具+同一参数不许重复调）· 最大迭代上限 · 结果太大先存档</div>
+  <div class="band blue">分工：简单查询走确定性快路径秒出；只有多步取证的问题才进循环，不浪费算力</div>
+  <div class="footer">一句话记忆：像查案——先想线索，再去调监控，看完监控再决定下一步问谁。</div>
+</section>
+
+<!-- 04 多Agent -->
+<section class="card" id="d04">
+  <div class="eyebrow">04 · 多 Agent 协作</div>
+  <h1 class="title">贵的模型想事儿，便宜的模型跑腿，还并行</h1>
+  <p class="subtitle">一个“为什么华东销售额下滑”的问题要查四五样证据。让强模型拆任务，几个快模型/工具同时干，最后合到一起——这就是 Coordinator 模式。</p>
+  <div class="row">
+    <div class="box blue"><h4>① Coordinator 拆任务</h4><p>拆成互不依赖的子问题，白名单限定谁能干活</p><div class="ex">拆成：查销售额趋势 / 查品类构成 / 查上次结论</div></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② 并行执行</h4><p>多个 Worker 同时开工，互不等待</p><div class="ex">data_worker 查数 · schema_worker 查表 · memory_worker 翻历史</div></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 汇总 Synthesize</h4><p>合并证据、标置信度、给可追溯的结论</p></div>
+  </div>
+  <div class="band plain">成本分级：简单问题单 Agent 就够；只有“要凑多路证据”的复杂问题才上并行，不搞形式主义</div>
+  <div class="band blue">降级设计：某个 Worker 失败不拖垮全局，拿着已有证据照样给结论，只是置信度标低一点</div>
+  <div class="footer">一句话记忆：项目经理拆活儿 → 组员并行干活 → 汇报时合并证据、注明“哪些查实了”。</div>
+</section>
+
+<!-- 05 ContextStore -->
+<section class="card" id="d05">
+  <div class="eyebrow">05 · ContextStore 延迟加载</div>
+  <h1 class="title">上下文塞不下？别扔，存仓库、给凭据、按需取</h1>
+  <p class="subtitle">工具一跑吐出 5000 行数据，全塞进上下文会挤爆；直接砍尾巴，后面追问“刚才那批数据里…”就失忆了。ContextStore 的解法：存档案，发编号。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 超预算就存档</h4><p>长结果写进仓库，上下文里只留摘要 + 一个编号</p><div class="ex">上下文里只显示“订单明细已存档 ref_id=42”</div></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② 模型继续干活</h4><p>上下文干净，关键信息不被淹没</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 要用再取回</h4><p>recall_context 工具三种取法</p><div class="ex">full 全文 / tail 只看结尾 / grep 搜关键词</div></div>
+  </div>
+  <div class="band blue">本质：把“截断丢信息”变成“图书馆存书”——书不在桌上，但书号在手，随时能借</div>
+  <div class="footer">一句话记忆：上下文是书桌，仓库是图书馆，ref_id 是借书卡。</div>
+</section>
+
+<!-- 06 混合检索 -->
+<section class="card" id="d06">
+  <div class="eyebrow">06 · RAG 与 Schema 混合检索</div>
+  <h1 class="title">子块负责“找得准”，父块负责“看得全”，双路检索防偏科</h1>
+  <p class="subtitle">用户问“回头客按省份的订单趋势”。“回头客”是语义问题，customer_unique_id 是精确字段名——一条检索路只能顾一头，所以走两条再融合。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 先切小块</h4><p>文档切成小块入库，块越小定位越准</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② 向量路 ×7</h4><p>懂“意思”，抓同义改写</p><div class="ex">“复购”≈“回头客”能对上</div></div>
+    <div class="arrow">＋</div>
+    <div class="box orange"><h4>③ 关键词路 ×3</h4><p>BM25 抓“字面”，保住表名字段名</p><div class="ex">customer_unique_id 一字不差命中</div></div>
+    <div class="arrow">→</div>
+    <div class="box purple"><h4>④ 融合＋升维</h4><p>RRF 排名融合 → 子块换回父块 → 精排出最终证据</p></div>
+  </div>
+  <div class="band plain">为什么要父块？命中的可能只是半句话“按 price 求和”，得换回整个段落才知道这是“销售额”的定义</div>
+  <div class="band blue">为什么 ×7/×3？向量容易“差不多都对”，多召回几条宽进严出；关键词路命中就八九不离十，少而精</div>
+  <div class="footer">一句话记忆：小块定位、大块理解；语义抓改写、关键词抓名字；最后融合排座次。</div>
+</section>
+
+<!-- 07 三级记忆 -->
+<section class="card" id="d07">
+  <div class="eyebrow">07 · 三级分析记忆</div>
+  <h1 class="title">Agent 的记性分三层，存的不是聊天记录，是“值得记的”</h1>
+  <p class="subtitle">全存聊天记录又贵又没用。按信息类型分开存：口径要稳定、结论要可查、习惯要贴心——检索时按类别配额取，谁也别想挤占谁。</p>
+  <div class="pile">
+    <div class="layer l1">语义记忆：存“业务常识”<small>存什么：指标口径、字段含义 · 例：“销售额 = 按订单明细 price 求和，不是 payment 表” · 特点：几乎不变，反复复用</small></div>
+    <div class="layer l2">情节记忆：存“发生过的事”<small>存什么：每次分析的结论 · 例：“上周查过：华东 GMV 下滑主因是家具品类” · 特点：带时间戳，越新越有用</small></div>
+    <div class="layer l3">程序记忆：存“你的习惯”<small>存什么：交互偏好 · 例：“这位用户爱按周看、先要结论、城市维度优先” · 特点：慢慢积累，让下次回答更对味</small></div>
+    <div class="layer l4">短期快照：存“正在进行的事”<small>存什么：当前会话的指标、筛选条件、刚生成的 SQL · 特点：放 Redis，会话结束就过期，只为接住“那换上个月呢”</small></div>
+  </div>
+  <div class="band blue" style="margin-top:16px">怎么用：回答前按配额检索三类记忆 → 相似度+新近度+重要度排序 → 融合进上下文，不搞“全量记忆回灌”</div>
+  <div class="footer">一句话记忆：语义=教科书，情节=工作日志，程序=你懂我，快照=便签纸。</div>
+</section>
+
+<!-- 08 LangGraph -->
+<section class="card" id="d08">
+  <div class="eyebrow">08 · LangGraph 编排</div>
+  <h1 class="title">四条路从上往下试：能确定的绝不掷骰子</h1>
+  <p class="subtitle">一个问题进来，路由金字塔从顶往下问：能走确定性路径吗？不能才降级。每层的判断结果都记在案，事后能查“当时为什么走了这条路”。</p>
+  <div class="pile">
+    <div class="layer l1">第一优先：根因分析链<small>问题带“为什么/异动/对比” → 进假设拆解 + 多路取证的分析模式</small></div>
+    <div class="layer l2">第二优先：NL→IR→SQL 确定性编译<small>指标和维度都在语义层有定义 → 代码直接编译出 SQL，不劳 LLM 动手</small></div>
+    <div class="layer l3">第三优先：ReAct / 多 Agent<small>问题要多步取证或并行拆解 → 进入工具循环或多 Worker 模式</small></div>
+    <div class="layer l4">兜底：LLM Fallback<small>全都没命中 → 把检索到的 Schema 上下文喂给 LLM 直接生成</small></div>
+  </div>
+  <div class="band blue" style="margin-top:16px">为什么用图而不是 if/else？路由关系显式画出来：状态、分支、降级、重试全都看得见、测得到、改得动</div>
+  <div class="footer">一句话记忆：确定的走编译，不确定的走 LLM，中间档位按复杂度递进，全程留痕。</div>
+</section>
+
+<!-- 09 监控 -->
+<section class="card" id="d09">
+  <div class="eyebrow">09 · 在线质量门禁与监控</div>
+  <h1 class="title">SQL 跑成功 ≠ 回答有价值：得盯速度、结果、用户脸色</h1>
+  <p class="subtitle">线上问题不能等用户骂上门才发现。每次请求留一条 Trace，门禁先挡住明显有问题的 SQL，监控再盯指标，坏案例自动进修复流程。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 每次请求留 Trace</h4><p>意图、路由、SQL、耗时、结果长啥样，全记下来</p></div>
+    <div class="arrow">→</div>
+    <div class="box red"><h4>② SQL Guard 事前拦截</h4><p>危险语句、明显不合理的查询当场挡下或修复</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 指标盯梢</h4><p>滑动窗口算 p99 延迟、成功率、空结果率、慢查询占比</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>④ 坏案例进闭环</h4><p>用户点踩 / 异常采样 → 进 Bad Case 修复流程</p></div>
+  </div>
+  <div class="band plain">盲区提醒：SQL 语法对、也执行了，但结果为空或 LIMIT 拉了百万行——这不算成功，要当质量信号记下来</div>
+  <div class="band blue">为什么看 p99 不看平均？平均值被大量快请求拉低，真正的卡顿全藏在最后 1% 里</div>
+  <div class="footer">一句话记忆：先留痕、再拦截、盯尾巴指标、坏例子送修——体检 + 门禁 + 售后三件套。</div>
+</section>
+
+<!-- 10 评测 -->
+<section class="card" id="d10">
+  <div class="eyebrow">10 · 双层评测</div>
+  <h1 class="title">结果错了别只扣分，得知道是“走错路”还是“算错数”</h1>
+  <p class="subtitle">只看最终对错，失败就是一团浆糊。拆成两层：过程层看“中间哪步偏了”，结果层用四个指标把“错”分成三种错法。</p>
+  <div class="two" style="margin-top:4px">
+    <div class="box blue"><h4>过程层：查路径</h4><p>意图判对没？路由走对没？Schema 选对表没？Guard 拦错没？</p><div class="ex">回答“从哪一步开始偏的”</div></div>
+    <div class="box green"><h4>结果层：验输出</h4><p>四个指标像四道关卡，逐层收窄</p><div class="ex">表命中率 97% → 行召回 0.851 → 字段准确 0.898 → 整体 EX 81.8%</div></div>
+  </div>
+  <div class="band plain">四指标的分工：选对表了吗（表命中率）→ 该有的行全了吗（行召回）→ 每个格子的数对吗（字段准确）→ 整体算过吗（EX）</div>
+  <div class="band blue">失败三分类对症下药：缺行 → 补检索；值错 → 查口径；行值都对但 EX 挂 → 八成是多查了行或排序不同</div>
+  <div class="footer">一句话记忆：过程层找病灶，结果层量伤情，四个指标一层层缩小包围圈。</div>
+</section>
+
+<!-- 11 SQL Guard -->
+<section class="card" id="d11">
+  <div class="eyebrow">11 · SQL 安全门禁</div>
+  <h1 class="title">LLM 生成 SQL 像实习生写报告：先过三道审，再放行</h1>
+  <p class="subtitle">用户说“帮我删掉那些异常订单”——话能听，SQL 不能直接跑。安全不能指望模型“自觉”，要靠确定性规则一层层审。</p>
+  <div class="row">
+    <div class="box red"><h4>① 写操作直接拦</h4><p>DELETE / UPDATE / INSERT / DROP，只读场景一票否决</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>② 结构审（AST）</h4><p>解析语法树：表存在吗？字段拼对吗？不是拿正则瞎蒙</p></div>
+    <div class="arrow">→</div>
+    <div class="box blue"><h4>③ 合理性审</h4><p>结果为空？LIMIT 太大？行数异常？可疑就修或拦</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>④ 放行 + 留底</h4><p>执行归执行，审计日志记下“谁、何时、跑了什么”</p></div>
+  </div>
+  <div class="band plain">允许修复但要限次：自动修一两次可以，无限重试就是烧钱黑洞</div>
+  <div class="band blue">为什么 AST 不用正则？正则只能看长相，AST 才懂结构——嵌套子查询里的违规表名，正则看不见</div>
+  <div class="footer">一句话记忆：先问能不能做，再看写得对不对，然后看合不合理，最后留个字据。</div>
+</section>
+
+<!-- 12 权限 -->
+<section class="card" id="d12">
+  <div class="eyebrow">12 · 数据权限与审计</div>
+  <h1 class="title">“能不能做这事”由后端说了算，模型只负责建议</h1>
+  <p class="subtitle">模型可以说“我建议执行这条 SQL”，但批不批准是权限系统的事。把“懂业务”交给 LLM，把“守规矩”交给确定性代码，各司其职。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 识别身份</h4><p>从请求里拿到“你是谁、什么角色”</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② RBAC 判定</h4><p>角色 → 权限清单，动作 → 需要什么权限，查表即知</p><div class="ex">访客角色请求导出全量数据 → 直接拒</div></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 危险动作二次确认</h4><p>发一个带过期时间的确认 token，用户点头才算数</p></div>
+    <div class="arrow">→</div>
+    <div class="box purple"><h4>④ 执行 + 审计</h4><p>谁、何时、对什么资源、做了什么、结果如何，全留痕</p></div>
+  </div>
+  <div class="band plain">和 SQL Guard 的分工：Guard 管“这条 SQL 本身安不安全”，权限管“这个人做这事行不行”</div>
+  <div class="footer">一句话记忆：模型是顾问，权限是保安，顾问说得再好听，保安不放行就不进门。</div>
+</section>
+
+<!-- 13 BadCase -->
+<section class="card" id="d13">
+  <div class="eyebrow">13 · Bad Case 闭环</div>
+  <h1 class="title">错题不是抄进错题本就完了，得订正、验算、才入册</h1>
+  <p class="subtitle">把失败样本直接塞回 Prompt 等于让模型“背错题”。闭环的做法：先搞清错因，修好后必须“验算通过”才允许写进 Few-shot 知识库。</p>
+  <div class="row">
+    <div class="box red"><h4>① 收集失败</h4><p>评测挂了 / 用户点踩 / 监控采样，连上下文一起存档</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>② 归因去重</h4><p>错在选表？Join？口径？同类问题只留一份，不重复入库</p></div>
+    <div class="arrow">→</div>
+    <div class="box blue"><h4>③ 修复候选</h4><p>生成更正后的 SQL / 示例，标注“为什么原来错了”</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>④ 验算入库</h4><p>回归验证通过才回写；过不了就转人工，宁缺毋滥</p></div>
+  </div>
+  <div class="band plain">为什么严？错误答案一旦入库会被反复检索引用——污染知识库，越学越歪，还很难追溯是哪条引入的</div>
+  <div class="band blue">实测节奏（有据可查）：11 个失败样本最终只回写 2 条——不是因为苛刻，是多数错误不在这层能修</div>
+  <div class="footer">一句话记忆：错题本不是剪贴簿，是订正本；入库前先验算，验不过就人工看。</div>
+</section>
+
+<!-- 14 会话恢复 -->
+<section class="card" id="d14">
+  <div class="eyebrow">14 · 多轮会话恢复</div>
+  <h1 class="title">追问接得上，靠的不是记性好，是便签记得勤</h1>
+  <p class="subtitle">“那和上个月比呢？”——要接住这句话，光有聊天记录不够，还得记得上一轮的指标、筛选条件、SQL 长什么样。这些结构化状态单独存。</p>
+  <div class="row">
+    <div class="box blue"><h4>① 存分析状态</h4><p>指标、维度、筛选条件、SQL、摘要，结构化保存</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>② Redis 快照</h4><p>会话级快速存取，设过期时间，不无限占内存</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>③ 历史压缩</h4><p>老对话压缩成摘要，原文进档案，不全量回灌</p></div>
+    <div class="arrow">→</div>
+    <div class="box purple"><h4>④ 追问时恢复</h4><p>继承上轮全部条件，只改“上个月”这个增量</p></div>
+  </div>
+  <div class="band plain">状态过期 / 表结构变了 / 两边同时改 —— 这些边界情况都要处理，不然恢复的是“假状态”</div>
+  <div class="band blue">为什么不全靠上下文窗口？窗口是聊天记录，不是数据库：找不快、放不多、一关就没了</div>
+  <div class="footer">一句话记忆：聊天记录管“说过啥”，结构化快照管“分析到哪了”，两本账分开记。</div>
+</section>
+
+<!-- 15 部署 -->
+<section class="card" id="d15">
+  <div class="eyebrow">15 · MCP 部署与 Docker 拓扑</div>
+  <h1 class="title">六个容器各干各的活，谁病了都看得见</h1>
+  <p class="subtitle">整个系统拆成：API 服务、PostgreSQL（元数据）、Redis（缓存/快照）、Milvus（向量检索）、etcd + MinIO（Milvus 的后勤）。Docker Compose 一键拉起，各配健康检查。</p>
+  <div class="row">
+    <div class="box blue"><h4>用户界面</h4><p>网页聊天入口，发请求、看图表</p></div>
+    <div class="arrow">→</div>
+    <div class="box green"><h4>ChatBI 后端</h4><p>编排、MCP 调用、SQL Guard、监控全在这层</p></div>
+    <div class="arrow">→</div>
+    <div class="box orange"><h4>存储后端</h4><p>PG 存元数据 · Redis 存快照 · Milvus 存向量</p></div>
+    <div class="arrow">→</div>
+    <div class="box purple"><h4>Milvus 后勤</h4><p>etcd 管元信息 · MinIO 存数据文件</p></div>
+  </div>
+  <div class="band plain">Milvus 双模式：开发用 Lite（一个文件、零部署），生产用 standalone（配合 etcd/MinIO 服务化）</div>
+  <div class="band blue">健康检查 + 启动顺序：依赖先起、服务后起，谁挂了重启谁，不用整套推倒重来</div>
+  <div class="footer">一句话记忆：开发图省事、生产讲稳妥；容器分得清，排障才不用大海捞针。</div>
+</section>
+
+</body></html>

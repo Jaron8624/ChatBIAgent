@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NexusMind 可信设计对比</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; color: #111827; margin-bottom: 4px; }
+.subtitle { text-align: center; font-size: 13px; color: #6b7280; margin-bottom: 16px; }
+.vs { display: grid; grid-template-columns: 1fr 60px 1fr; gap: 0; max-width: 1150px; margin: 0 auto 14px; align-items: stretch; }
+.col { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.col.bad { border-top: 4px solid #ef4444; }
+.col.good { border-top: 4px solid #22c55e; }
+.col h2 { font-size: 15px; margin-bottom: 10px; }
+.col.bad h2 { color: #991b1b; }
+.col.good h2 { color: #166534; }
+.vsmark { display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 800; color: #9ca3af; }
+.item { display: flex; gap: 10px; margin-bottom: 11px; }
+.item:last-child { margin-bottom: 0; }
+.icon { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; margin-top: 1px; }
+.bad .icon { background: #fee2e2; color: #991b1b; }
+.good .icon { background: #dcfce7; color: #166534; }
+.item .t { font-size: 13px; font-weight: 700; color: #111827; }
+.item .d { font-size: 12px; color: #4b5563; line-height: 1.5; margin-top: 2px; }
+.guard { max-width: 1150px; margin: 0 auto; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 12px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.guard .gt { font-size: 13px; font-weight: 700; color: #6b7280; letter-spacing: .5px; margin-bottom: 8px; }
+.guard-row { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.gstep { flex: 1; border-radius: 8px; padding: 9px 10px; text-align: center; font-size: 12px; }
+.gstep .t { font-weight: 700; font-size: 12.5px; margin-bottom: 2px; }
+.gstep .d { color: #4b5563; font-size: 11px; line-height: 1.4; }
+.g1 { background: #eff6ff; border: 1.2px solid #93c5fd; } .g1 .t { color: #1e40af; }
+.g2 { background: #fef3c7; border: 1.2px solid #fbbf24; } .g2 .t { color: #92400e; }
+.g3 { background: #f3e8ff; border: 1.2px solid #c4b5fd; } .g3 .t { color: #6b21a8; }
+.gsep { color: #9ca3af; font-size: 16px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<h1>为什么不能只靠 LLM 直接生成 SQL？</h1>
+<div class="subtitle">裸 LLM 的三大失效模式 vs NexusMind 的工程化解法</div>
+
+<div class="vs">
+  <div class="col bad">
+    <h2>✗ 裸 LLM 生成 SQL</h2>
+    <div class="item">
+      <div class="icon">1</div>
+      <div><div class="t">指标口径漂移</div><div class="d">同一个"销售额"，这次聚合 price，下次可能聚合 payment_value——口径每次都可能不同，今天和明天的答案对不上。</div></div>
+    </div>
+    <div class="item">
+      <div class="icon">2</div>
+      <div><div class="t">JOIN 路径失控</div><div class="d">多表关联时模型自由选择路径，可能漏关联、错关联或重复计数——订单和支付是一对多，直接 JOIN 会让订单量虚增。</div></div>
+    </div>
+    <div class="item">
+      <div class="icon">3</div>
+      <div><div class="t">静默错误</div><div class="d">SQL 能执行但结果是错的：空结果、比率超 100%、TopN 忘记 LIMIT——没有任何报错信号，最危险。</div></div>
+    </div>
+  </div>
+
+  <div class="vsmark">VS</div>
+
+  <div class="col good">
+    <h2>✓ NexusMind 的解法</h2>
+    <div class="item">
+      <div class="icon">1</div>
+      <div><div class="t">语义层确定性编译</div><div class="d">14 指标 × 18 维度的口径固化为代码，命中已治理指标走编译器而非模型——同一个 Plan 永远生成同一条 SQL，口径可审计。</div></div>
+    </div>
+    <div class="item">
+      <div class="icon">2</div>
+      <div><div class="t">已验证 JOIN 关系图</div><div class="d">Schema 三级检索直接给出验证过的 JOIN 子句，不让模型看到外键后自己猜——从根上杜绝连错表、漏关联。</div></div>
+    </div>
+    <div class="item">
+      <div class="icon">3</div>
+      <div><div class="t">SQL Guard 三层防护</div><div class="d">静态校验 + 执行自修复 + 结果合理性检查，静默错误被逐一捕捉；告警随结果展示，绝不盲改业务口径。</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="guard">
+  <div class="gt">SQL GUARD 三层防线 · 每层防一类完全不同的故障</div>
+  <div class="guard-row">
+    <div class="gstep g1"><div class="t">① 静态校验（执行前）</div><div class="d">sqlglot AST 判定：只读约束 / 方言函数黑名单 / 表列存在性 / 多语句注入拦截</div></div>
+    <div class="gsep">→</div>
+    <div class="gstep g2"><div class="t">② 执行自修复（报错后）</div><div class="d">错误信息 + Schema 反馈修复模型，≤2 轮；意图保持约束防越修越偏</div></div>
+    <div class="gsep">→</div>
+    <div class="gstep g3"><div class="t">③ 结果合理性（成功后）</div><div class="d">空结果 / TopN 无 LIMIT 回送重试；NULL 占比 / 比率越界只告警不改口径</div></div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>父子块切分 · 数据流图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1180px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; letter-spacing: 1px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 26px; }
+  .row { display: flex; align-items: stretch; gap: 0; }
+  .col { display: flex; flex-direction: column; gap: 14px; }
+  .card {
+    background: #ffffff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 16px 20px; box-shadow: 4px 4px 0 #bfdbfe;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 18px; margin-bottom: 8px; color: #1e293b; }
+  .card .tag { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 8px; font-weight: 600; }
+  .card.green .tag { background: #ecfdf5; color: #059669; }
+  .card.orange .tag { background: #fffbeb; color: #d97706; }
+  .card.purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .card.gray .tag { background: #f8fafc; color: #475569; }
+  .card p, .card li { font-size: 14.5px; color: #475569; line-height: 1.75; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 13px; color: #be185d; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 26px; color: #2563eb; font-weight: 700; padding: 0 14px; flex-shrink: 0; }
+  .arrow-v { text-align: center; font-size: 24px; color: #2563eb; font-weight: 700; line-height: 1.3; padding: 4px 0; }
+  .arrow small { display: block; font-size: 12.5px; color: #64748b; font-weight: 500; }
+  .chunk-demo { background: #f8fafc; border: 1.5px dashed #94a3b8; border-radius: 12px; padding: 12px 16px; font-size: 13.5px; color: #475569; line-height: 1.9; }
+  .chunk-demo .p { color: #1e3a8a; font-weight: 600; }
+  .chunk-demo .c { color: #059669; }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 14px 22px; margin-top: 24px; font-size: 16px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+  .section-title { font-size: 15px; font-weight: 700; color: #1e3a8a; background: #dbeafe; display: inline-block; padding: 3px 14px; border-radius: 999px; margin-bottom: 10px; width: fit-content; }
+</style>
+</head>
+<body>
+  <h1>父子块切分（Parent-Child Chunking）</h1>
+  <div class="sub">核心思想：用<b>小（子）块</b>保证检索精度，用<b>大（父）块</b>保证回答时的上下文完整</div>
+
+  <div class="section-title">① 入库阶段</div>
+  <div class="row">
+    <div class="card gray" style="width: 210px; align-self: center;">
+      <span class="tag">输入</span>
+      <h3>退款政策.pdf</h3>
+      <p>PyMuPDFLoader 加载全文</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card" style="width: 315px;">
+      <span class="tag">两级切分</span>
+      <h3>DocumentProcessor</h3>
+      <p><b>parent_splitter</b>：先切大父块（保留完整段落语义）</p>
+      <p style="margin-top:6px"><b>child_splitter</b>：对<b>每个父块单独再切</b>细粒度子块</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="col" style="flex: 1;">
+      <div class="card green">
+        <span class="tag">去重关卡</span>
+        <h3>sha256 内容哈希查重</h3>
+        <p>每个子块算哈希，批量比对已入库哈希——重复块直接跳过，知识库可反复增量入库不膨胀</p>
+      </div>
+      <div class="row" style="gap: 14px;">
+        <div class="card orange" style="flex: 1;">
+          <span class="tag">子块 → Milvus</span>
+          <p>子块生成 Embedding 写入向量库，metadata 携带 <code>parent_id</code> + <code>child_chunk_hash</code><br><b>检索只面向子块</b></p>
+        </div>
+        <div class="card purple" style="flex: 1;">
+          <span class="tag">父块 → PostgreSQL</span>
+          <p>父块原文按 <code>parent_id</code> 存储<br>不负责检索，只负责<b>取回完整上下文</b></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-v">▼</div>
+
+  <div class="section-title">② 切块实际长什么样</div>
+  <div class="chunk-demo">
+    <span class="p">父块 P1（约500字）</span>：退款政策：一、配送超时订单的退款规则。1. 超时15分钟内…… 2. 超时15-30分钟赔付5元…… 3. 超时30分钟以上……<br>
+    &nbsp;&nbsp;├─ <span class="c">子块 P1-C1</span>：超时 15 分钟内不支持退款<br>
+    &nbsp;&nbsp;├─ <span class="c">子块 P1-C2</span>：超时 15-30 分钟赔付 5 元红包<br>
+    &nbsp;&nbsp;└─ <span class="c">子块 P1-C3</span>：超时 30 分钟以上支持全额退款并赔付 8 元
+  </div>
+
+  <div class="arrow-v">▼</div>
+
+  <div class="section-title">③ 查询阶段："超时 20 分钟能退吗"</div>
+  <div class="row" style="gap: 14px;">
+    <div class="card" style="flex: 1;">
+      <span class="tag">Step 1 精准命中</span>
+      <p>向量检索命中<b>子块 P1-C2</b>——细粒度子块精准匹配"15-30 分钟"区间</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card purple" style="flex: 1;">
+      <span class="tag">Step 2 取回父块</span>
+      <p>按 <code>parent_id</code> 到 PostgreSQL 取回<b>父块 P1 完整条文</b></p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card green" style="flex: 1;">
+      <span class="tag">Step 3 完整作答</span>
+      <p>完整条文注入 Prompt，模型基于完整上下文生成回答</p>
+    </div>
+  </div>
+
+  <div class="key">一句话总结：<b>检索的精度由子块保证，回答的上下文完整性由父块保证</b>——解决"切小块召回准但上下文残缺，切大块上下文全但召回糙"的两难。</div>
+</body>
+</html>

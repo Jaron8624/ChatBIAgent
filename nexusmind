@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NexusMind CLI 入口脚本
+
+使用方式:
+  ./nexusmind              # 直接进入交互式对话（默认 chat 模式）
+  ./nexusmind chat         # 交互式对话
+  ./nexusmind chat --stream # 流式对话
+  ./nexusmind test         # 一键验证所有功能
+  ./nexusmind kb upload ./report.pdf
+  ./nexusmind intent "帮我查订单"
+  ./nexusmind skills list
+  ./nexusmind monitor
+  ./nexusmind session list
+
+等价于:
+  python cli.py <args>
+"""
+
+import sys
+import os
+
+# 将当前目录加入 Python 路径，确保可以 import backend 模块
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+from cli import main
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,20 @@
+{
+  "name": "data_analysis",
+  "description": "分析数据并给出业务洞察",
+  "prompt_template": "请分析以下数据并给出关键洞察：\n\n数据：\n{data}\n\n关注趋势、异常、关联性和可操作建议。",
+  "examples": [
+    "分析销售数据 → 指出 Q3 增长驱动力"
+  ],
+  "input_schema": {},
+  "category": "analysis",
+  "tags": [
+    "数据",
+    "分析",
+    "业务"
+  ],
+  "version": "1.0.0",
+  "created_at": "2026-08-25T15:20:09.768496",
+  "updated_at": "2026-08-25T15:20:09.768496",
+  "usage_count": 0,
+  "success_rate": 1.0
+}

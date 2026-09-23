@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>向量数据库存储与 HNSW 索引</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; color: #111827; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 18px; }
+.wrap { display: flex; gap: 20px; justify-content: center; max-width: 1100px; margin: 0 auto; flex-wrap: wrap; }
+.col { flex: 1; min-width: 320px; max-width: 520px; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.col h2 { font-size: 15px; text-align: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px dashed #d1d5db; }
+.col.left h2 { color: #1e40af; }
+.col.right h2 { color: #92400e; }
+
+/* 左：存储格式 */
+.record { background: #eff6ff; border: 1.2px solid #93c5fd; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; }
+.record .head { font-weight: 700; color: #1e40af; margin-bottom: 6px; }
+.field { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px dotted #e5e7eb; }
+.field:last-child { border: none; }
+.field .k { color: #6b7280; }
+.field .v { color: #1f2937; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.leg { font-size: 11px; color: #6b7280; margin-top: 8px; padding: 6px; background: #f9fafb; border-radius: 6px; }
+
+/* 右：HNSW 分层 */
+.layers { position: relative; height: 320px; }
+.lvl { position: absolute; left: 0; right: 0; border: 1.2px dashed #d1d5db; border-radius: 6px; padding: 8px; font-size: 11px; }
+.lvl .label { position: absolute; left: -2px; top: -10px; background: #fff; padding: 0 4px; font-weight: 700; color: #92400e; font-size: 11px; }
+.node { width: 16px; height: 16px; border-radius: 50%; background: #fbbf24; border: 1.5px solid #92400e; display: inline-block; margin: 2px; vertical-align: middle; }
+.node.q { background: #ef4444; border-color: #991b1b; }
+.edge { stroke: #9ca3af; stroke-width: 1.2; fill: none; }
+.lvl0 { top: 4px; height: 38px; }
+.lvl1 { top: 56px; height: 50px; }
+.lvl2 { top: 122px; height: 60px; }
+.lvl3 { top: 198px; height: 90px; background: #fffbeb; }
+.path { position: absolute; bottom: -20px; left: 10px; right: 10px; font-size: 10.5px; color: #6b7280; background: #f9fafb; padding: 4px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<h1>向量数据库：存储格式 与 HNSW 索引</h1>
+<p class="sub">Milvus 双索引（IVF_FLAT 向量 + MARISA 关键词）· HNSW 分层小世界图加速 ANN 检索</p>
+
+<div class="wrap">
+
+  <!-- 左：存储格式 -->
+  <div class="col left">
+    <h2>📦 一条向量的完整存储格式</h2>
+
+    <div class="record">
+      <div class="head">集合：memory_episodic（情景记忆）</div>
+      <div class="field"><span class="k">id</span><span class="v">int64 自增主键</span></div>
+      <div class="field"><span class="k">vector</span><span class="v">FloatVector(1024) — bge-m3</span></div>
+      <div class="field"><span class="k">content</span><span class="v">VARCHAR(2048) 原文</span></div>
+      <div class="field"><span class="k">role</span><span class="v">VARCHAR — user/assistant</span></div>
+      <div class="field"><span class="k">timestamp</span><span class="v">int64 毫秒</span></div>
+      <div class="field"><span class="k">session_id</span><span class="v">VARCHAR 会话标识</span></div>
+      <div class="field"><span class="k">metadata (json)</span><span class="v">{turn, topic, weight}</span></div>
+    </div>
+
+    <div class="record">
+      <div class="head">索引参数</div>
+      <div class="field"><span class="k">index_type</span><span class="v">HNSW</span></div>
+      <div class="field"><span class="k">metric_type</span><span class="v">COSINE</span></div>
+      <div class="field"><span class="k">M</span><span class="v">16 — 每层最大邻居数</span></div>
+      <div class="field"><span class="k">efConstruction</span><span class="v">200 — 建图候选数</span></div>
+      <div class="field"><span class="k">ef（查询）</span><span class="v">64 — 召回候选数</span></div>
+    </div>
+
+    <div class="leg">标量字段走 MARISA Trie 关键词索引（用于 metadata 过滤）；向量字段走 HNSW。一次查询 = 标量预过滤 + HNSW ANN + TopK。</div>
+  </div>
+
+  <!-- 右：HNSW 分层 -->
+  <div class="col right">
+    <h2>🌐 HNSW 分层小世界图（检索路径）</h2>
+    <div class="layers" style="position:relative;">
+      <div class="lvl lvl0">
+        <span class="label">Layer 2（最稀疏 · 入口）</span>
+        <div style="text-align:center; margin-top:8px;">
+          <span class="node"></span>
+          <span style="color:#9ca3af; margin:0 30px;">—</span>
+          <span class="node"></span>
+        </div>
+      </div>
+
+      <div class="lvl lvl1">
+        <span class="label">Layer 1</span>
+        <div style="text-align:center; margin-top:6px;">
+          <span class="node"></span>
+          <span style="color:#9ca3af; margin:0 12px;">—</span>
+          <span class="node"></span>
+          <span style="color:#9ca3af; margin:0 12px;">—</span>
+          <span class="node"></span>
+        </div>
+      </div>
+
+      <div class="lvl lvl2">
+        <span class="label">Layer 0（全量 · 底层）</span>
+        <div style="text-align:center; margin-top:8px;">
+          <span class="node"></span>
+          <span style="color:#9ca3af; margin:0 6px;">—</span>
+          <span class="node q" title="查询向量"></span>
+          <span style="color:#9ca3af; margin:0 6px;">—</span>
+          <span class="node"></span>
+          <span style="color:#9ca3af; margin:0 6px;">—</span>
+          <span class="node"></span>
+        </div>
+      </div>
+
+      <div class="lvl lvl3">
+        <span class="label">候选 → 重排 → TopK</span>
+        <div style="margin-top:6px; font-size:11px;">
+          ① 从最稀疏层入口做 <b>贪心搜索</b><br>
+          ② 每层找最近邻 → 下沉一层<br>
+          ③ Layer 0 全量候选 → <b>ef=64</b> 优先队列<br>
+          ④ 距离精确计算 → <b>TopK=10</b> 返回
+        </div>
+      </div>
+
+      <div class="path">查询向量 <span class="node q" style="display:inline-block; vertical-align:middle;"></span> 在 Layer 0 附近，红色 = 命中的 TopK 之一。复杂度 O(log N)，避免暴力 O(N·d)。</div>
+    </div>
+
+    <div class="leg" style="margin-top:24px;">M=16 限制每层邻居数 → 内存可控；efConstruction 越大建图越精但越慢；ef 查询参数可在召回率/延迟间权衡。COSINE 度量 = 归一化后内积，适合语义相似度。</div>
+  </div>
+
+</div>
+
+</body>
+</html>

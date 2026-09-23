@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NexusMind 一页纸概览</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #e8edf4;
+  padding: 36px;
+  display: flex; justify-content: center;
+}
+.card {
+  width: 740px; background: #ffffff; border-radius: 20px;
+  box-shadow: 0 10px 34px rgba(15,23,42,.13);
+  overflow: hidden;
+  color: #1f2937;
+}
+/* 头部深蓝渐变带 */
+.head {
+  background: linear-gradient(120deg, #0f172a 0%, #1e3a8a 55%, #2563eb 100%);
+  color: #fff; padding: 22px 34px 20px;
+  position: relative;
+}
+.head .tag {
+  display: inline-block; font-size: 11.5px; font-weight: 700;
+  background: rgba(255,255,255,.15); color: #c7d2fe;
+  border: 1px solid rgba(255,255,255,.22);
+  padding: 4px 11px; border-radius: 999px; letter-spacing: .5px;
+}
+.head h1 { font-size: 28px; margin-top: 10px; letter-spacing: 1px; }
+.head .sub { font-size: 13.5px; color: #cbd5e1; margin-top: 5px; }
+.head .slogan {
+  position: absolute; right: 34px; top: 26px;
+  font-size: 12px; color: #fbbf24; font-weight: 700;
+  border: 1px solid rgba(251,191,36,.45);
+  padding: 5px 12px; border-radius: 999px;
+}
+.head .meta {
+  font-size: 11.5px; color: #93a3c4; margin-top: 11px;
+  display: flex; gap: 14px; align-items: center;
+}
+.head .meta .dot { width: 4px; height: 4px; background: #475569; border-radius: 50%; }
+
+/* 通用块 */
+.body { padding: 22px 30px 24px; }
+.block { margin-bottom: 20px; }
+.b-title { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.b-title .num {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: linear-gradient(135deg,#1e3a8a,#3b82f6);
+  color: #fff; font-size: 12px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+}
+.b-title .name { font-size: 15px; font-weight: 800; color: #0f172a; }
+.b-title .desc { font-size: 11.5px; color: #94a3b8; }
+
+/* 简介 */
+.intro { font-size: 13px; line-height: 1.78; color: #334155; }
+.intro b { color: #1e40af; }
+.intro em { color: #b45309; font-style: normal; font-weight: 700; }
+
+/* Agent 底座 2x2 */
+.cap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+.cap {
+  border: 1px solid #e2e8f0; border-radius: 13px;
+  padding: 12px 13px 11px; background: #f8fafc;
+  border-left: 3px solid #3b82f6;
+}
+.cap.c2 { border-left-color: #8b5cf6; }
+.cap.c3 { border-left-color: #0d9488; }
+.cap.c4 { border-left-color: #f59e0b; }
+.cap .ct {
+  font-size: 13px; font-weight: 800; color: #0f172a;
+  display: flex; align-items: center; gap: 6px;
+}
+.cap .ct .ic { font-size: 13px; }
+.cap .cd {
+  font-size: 11.5px; color: #475569; line-height: 1.6;
+  margin-top: 5px;
+}
+.cap .cd b { color: #1e3a8a; }
+
+/* ChatBI 链路 横向 pipeline */
+.pipe {
+  display: flex; align-items: stretch; gap: 0;
+  background: #f1f5f9; border-radius: 12px; padding: 9px;
+}
+.step {
+  flex: 1; text-align: center; padding: 7px 4px;
+  font-size: 11px; color: #334155; line-height: 1.35;
+}
+.step .st { font-size: 12px; font-weight: 800; color: #1e3a8a; display: block; }
+.arr {
+  width: 14px; display: flex; align-items: center; justify-content: center;
+  color: #94a3b8; font-weight: 800; font-size: 13px;
+}
+.pipe-note {
+  font-size: 11px; color: #64748b; margin-top: 7px; text-align: center;
+}
+.pipe-note b { color: #b45309; }
+
+/* 成果 */
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.metric {
+  border: 1px solid #e2e8f0; border-radius: 12px;
+  padding: 11px 11px 10px; background: #fff; text-align: center;
+}
+.metric .k { font-size: 10.8px; color: #64748b; }
+.metric .v { font-size: 18px; font-weight: 800; color: #1e3a8a; margin-top: 4px; line-height: 1.1; }
+.metric .v.green { color: #15803d; }
+.metric .v.amber { color: #b45309; }
+.metric .s { font-size: 10px; color: #94a3b8; margin-top: 4px; }
+
+.badges {
+  display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px;
+}
+.chip {
+  font-size: 11px; color: #334155;
+  background: #f1f5f9; border: 1px solid #e2e8f0;
+  padding: 4px 10px; border-radius: 999px;
+}
+.chip b { color: #1e3a8a; }
+
+/* SQL Guard 三格 */
+.guard-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.guard {
+  border: 1px solid #e2e8f0; border-radius: 12px;
+  padding: 11px 12px; background: #f8fafc;
+  border-top: 3px solid #3b82f6;
+}
+.guard.g2 { border-top-color: #b45309; }
+.guard.g3 { border-top-color: #15803d; }
+.guard .gt { font-size: 12.5px; font-weight: 800; color: #0f172a; }
+.guard .gd { font-size: 11px; color: #475569; line-height: 1.55; margin-top: 4px; }
+
+.foot {
+  background: #0f172a; color: #64748b;
+  font-size: 11px; text-align: center; letter-spacing: 1px;
+  padding: 10px 0;
+}
+</style>
+</head>
+<body>
+
+<div class="card">
+
+  <!-- 头部 -->
+  <div class="head">
+    <span class="tag">个人项目 · 大模型应用 / 后端方向</span>
+    <div class="slogan">能确定的不交给概率</div>
+    <h1>NexusMind</h1>
+    <div class="sub">语义驱动的多智能体 ChatBI 与数据洞察系统</div>
+    <div class="meta">
+      <span>LangGraph 编排</span><span class="dot"></span>
+      <span>Text2SQL 双段编译</span><span class="dot"></span>
+      <span>三级分层记忆</span><span class="dot"></span>
+      <span>2025.06 ~ 2026.08</span>
+    </div>
+  </div>
+
+  <div class="body">
+
+    <!-- 1. 简介 -->
+    <div class="block">
+      <div class="b-title">
+        <div class="num">1</div>
+        <div class="name">项目简介</div>
+        <div class="desc">一句话讲清楚在做什么</div>
+      </div>
+      <div class="intro">
+        面向结构化业务数据，用 <b>LangGraph 多智能体底座</b>承载自然语言意图，已治理指标走 <b>NL → IR → SQL 两阶段确定性编译</b>，未治理指标走多智能体协作；SQL 经 <em>AST 静态校验 → 执行自修复 → 结果合理性</em> 三层 Guard 兜底，并辅以根因分析与字段级评测，做到<b>口径零幻觉、链路可审计</b>。
+      </div>
+    </div>
+
+    <!-- 2. Agent 底座四大能力 -->
+    <div class="block">
+      <div class="b-title">
+        <div class="num">2</div>
+        <div class="name">Agent 底座 · 四大能力</div>
+        <div class="desc">规划 / 记忆 / 检索 / 上下文，Agent 四角全齐</div>
+      </div>
+      <div class="cap-grid">
+        <div class="cap c1">
+          <div class="ct"><span class="ic">🧭</span>规划与编排</div>
+          <div class="cd">LangGraph <b>StateGraph 14 节点</b>拓扑，Supervisor 路由 + ReAct 执行 + Coordinator 动态组队 + Reflection 自省四模式；<b>Span 追踪</b>定位冗余 LLM 调用，编排延迟 29s → 10s。</div>
+        </div>
+        <div class="cap c2">
+          <div class="ct"><span class="ic">🧠</span>三级分层记忆</div>
+          <div class="cd">语义 / 情节 / 程序三层，Milvus <b>双索引（稠密 HNSW + 稀疏 BM25）</b>双路召回；融合<b>语义 × 时近性 × 重要性</b>三因子排序，写入做冲突检测，长对话不失忆也不串口径。</div>
+        </div>
+        <div class="cap c3">
+          <div class="ct"><span class="ic">🗂️</span>上下文管理三件套</div>
+          <div class="cd"><b>Token 触发压缩</b>滑窗 + <b>ContextStore 懒加载</b>按引用召回 + <b>QueryRewriter</b> 指代消解；多轮上下文稳定压在 4K token 内，专治长对话 Lost-in-the-Middle。</div>
+        </div>
+        <div class="cap c4">
+          <div class="ct"><span class="ic">📚</span>检索增强 RAG</div>
+          <div class="cd">父子块切片 + 稠密 / BM25 双路召回 + <b>RRF 融合 + Cross-Encoder Rerank</b>；高并发降级，Schema / 文档 / 记忆三库隔离，召回即最小充分上下文。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Schema 三层索引 -->
+    <div class="block">
+      <div class="b-title">
+        <div class="num">3</div>
+        <div class="name">Schema 三层索引收敛</div>
+        <div class="desc">域 → 表 → 字段逐级收敛，只给模型看最小充分 Schema</div>
+      </div>
+      <div class="guard-grid">
+        <div class="guard g1">
+          <div class="gt">L1 · 数据域过滤</div>
+          <div class="gd">先按业务语义定位数据域（订单 / 评价 / 支付…），无关域整域排除，候选空间直接缩小一个量级。</div>
+        </div>
+        <div class="guard g2">
+          <div class="gt">L2 · 表级混合召回</div>
+          <div class="gd">域内稠密 + BM25 双路召回 + RRF 融合取候选表，避免全库 Schema 暴力堆进 Prompt，召回即控长。</div>
+        </div>
+        <div class="guard g3">
+          <div class="gt">L3 · 字段级精排</div>
+          <div class="gd">字段级 Cross-Encoder Rerank，抽出最小充分字段 + 样例值 / 枚举值，交给 NL→IR 结构化抽取。</div>
+        </div>
+      </div>
+      <div class="pipe-note">逐级过滤而非全量投喂：<b>表命中率 97.0%</b>，上下文里只有该看的字段</div>
+    </div>
+
+    <!-- 4. ChatBI 可信链路 -->
+    <div class="block">
+      <div class="b-title">
+        <div class="num">4</div>
+        <div class="name">ChatBI 可信链路</div>
+        <div class="desc">意图到 SQL 的横向流水线</div>
+      </div>
+      <div class="pipe">
+        <div class="step"><span class="st">意图融合</span>规则+LLM+历史</div>
+        <div class="arr">▶</div>
+        <div class="step"><span class="st">Schema 检索</span>域→表→字段</div>
+        <div class="arr">▶</div>
+        <div class="step"><span class="st">NL→IR</span>结构化中间表示</div>
+        <div class="arr">▶</div>
+        <div class="step"><span class="st">语义编译</span>口径确定性出 SQL</div>
+        <div class="arr">▶</div>
+        <div class="step"><span class="st">SQL Guard</span>AST→自修复→合理性</div>
+        <div class="arr">▶</div>
+        <div class="step"><span class="st">执行归因</span>字段级评测诊断</div>
+      </div>
+      <div class="pipe-note">已治理指标 <b>确定性编译</b>（口径零幻觉），未治理走多智能体协作生成，<b>两条路径共用同一 Guard</b></div>
+    </div>
+
+    <!-- 5. 成果 -->
+    <div class="block">
+      <div class="b-title">
+        <div class="num">5</div>
+        <div class="name">核心成果</div>
+        <div class="desc">Spider 开放域学术基准验证</div>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="k">EX 执行准确率</div>
+          <div class="v">80.8%</div>
+          <div class="s">80/99 · zero-shot</div>
+        </div>
+        <div class="metric">
+          <div class="k">表命中率</div>
+          <div class="v green">97.0%</div>
+          <div class="s">Schema Linking</div>
+        </div>
+        <div class="metric">
+          <div class="k">行召回 / 字段准确</div>
+          <div class="v amber">0.851 / 0.898</div>
+          <div class="s">诊断链定位瓶颈</div>
+        </div>
+        <div class="metric">
+          <div class="k">编排延迟优化</div>
+          <div class="v">−66%</div>
+          <div class="s">29s → 10s · Span 定位冗余调用</div>
+        </div>
+      </div>
+      <div class="badges">
+        <span class="chip">语义层治理 <b>14 指标 × 18 维度</b></span>
+        <span class="chip">6 类复合计划模板</span>
+        <span class="chip">36 项离线回归全通过</span>
+        <span class="chip">10/20 数据库 EX 满分</span>
+        <span class="chip">SQL Guard 三层防护 · 一次通过 90%+</span>
+        <span class="chip">官方 MCP SDK 统一工具层</span>
+        <span class="chip">前端 8 页面全链路</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="foot">LangGraph · Text-to-SQL · Semantic Layer · MCP · RAG · Three-Tier Memory · Context Eng.</div>
+</div>
+
+</body>
+</html>

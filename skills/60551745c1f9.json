@@ -1,0 +1,19 @@
+{
+  "name": "task_planning",
+  "description": "将复杂任务拆解为可执行的子任务列表",
+  "prompt_template": "请将以下复杂任务拆解为具体的执行步骤：\n\n任务：{query}\n\n输出格式：1. 步骤一... 2. 步骤二...",
+  "examples": [
+    "帮我完成季度报告 → 拆解为数据收集、分析、撰写等步骤"
+  ],
+  "input_schema": {},
+  "category": "planning",
+  "tags": [
+    "规划",
+    "任务拆解"
+  ],
+  "version": "1.0.0",
+  "created_at": "2026-08-25T15:20:09.768493",
+  "updated_at": "2026-08-25T15:20:09.768493",
+  "usage_count": 0,
+  "success_rate": 1.0
+}

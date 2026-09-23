@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NexusMind 核心指标成果</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; color: #111827; margin-bottom: 4px; }
+.subtitle { text-align: center; font-size: 13px; color: #6b7280; margin-bottom: 16px; }
+.section { max-width: 1150px; margin: 0 auto 14px; }
+.section-title { font-size: 13px; font-weight: 700; color: #6b7280; letter-spacing: .5px; margin-bottom: 8px; }
+.big-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.big { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.big .v { font-size: 30px; font-weight: 800; margin: 2px 0; }
+.big .k { font-size: 13px; font-weight: 700; color: #374151; }
+.big .d { font-size: 11px; color: #6b7280; margin-top: 4px; line-height: 1.4; }
+.b1 { border-top: 4px solid #3b82f6; } .b1 .v { color: #1e40af; }
+.b2 { border-top: 4px solid #22c55e; } .b2 .v { color: #166534; }
+.b3 { border-top: 4px solid #f59e0b; } .b3 .v { color: #92400e; }
+.b4 { border-top: 4px solid #a855f7; } .b4 .v { color: #6b21a8; }
+.funnel { display: flex; align-items: stretch; justify-content: center; gap: 6px; }
+.fstep { flex: 1; background: #eff6ff; border: 1.2px solid #93c5fd; border-radius: 8px; padding: 10px 8px; text-align: center; }
+.fstep .t { font-size: 12.5px; font-weight: 700; color: #1e40af; }
+.fstep .v { font-size: 17px; font-weight: 800; color: #1e40af; margin-top: 2px; }
+.fstep .d { font-size: 10.5px; color: #6b7280; margin-top: 3px; }
+.fsep { align-self: center; color: #9ca3af; font-size: 18px; font-weight: 700; }
+.stat-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.stat { background: #fff; border: 1.2px solid #d1d5db; border-radius: 8px; padding: 10px 6px; text-align: center; }
+.stat .v { font-size: 19px; font-weight: 800; color: #111827; }
+.stat .k { font-size: 11px; color: #6b7280; margin-top: 3px; line-height: 1.35; }
+.note { max-width: 1150px; margin: 0 auto; background: #fffbeb; border: 1.2px solid #fbbf24; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #92400e; line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<h1>NexusMind 核心指标成果</h1>
+<div class="subtitle">Spider 开放域学术基准（Yale · 20 个异构数据库 · 99 题 · zero-shot · 温度 0.0 · 严格判等）</div>
+
+<div class="section">
+  <div class="section-title">① 四项核心指标（每题中间产物落盘 eval_spider.json，可逐题复核）</div>
+  <div class="big-row">
+    <div class="big b1"><div class="v">78.8%</div><div class="k">EX 执行准确率</div><div class="d">结果集与 Gold SQL 严格一致<br>78 / 99 题</div></div>
+    <div class="big b2"><div class="v">97.0%</div><div class="k">表命中率</div><div class="d">Schema Linking 选对表<br>96 / 99 题</div></div>
+    <div class="big b3"><div class="v">0.851</div><div class="k">行召回率</div><div class="d">应返回的行被查全的比例<br>定位过滤 / JOIN 问题</div></div>
+    <div class="big b4"><div class="v">0.898</div><div class="k">字段准确率</div><div class="d">已匹配行的单元格值正确率<br>定位口径 / 聚合问题</div></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">② 字段级诊断链：瓶颈定位而不是"只知道错了"</div>
+  <div class="funnel">
+    <div class="fstep"><div class="t">选对表</div><div class="v">97.0%</div><div class="d">Schema Linking</div></div>
+    <div class="fsep">→</div>
+    <div class="fstep" style="background:#fef3c7;border-color:#fbbf24"><div class="t" style="color:#92400e">查全行</div><div class="v" style="color:#92400e">0.851</div><div class="d">瓶颈在此：复杂过滤</div></div>
+    <div class="fsep">→</div>
+    <div class="fstep"><div class="t">值准确</div><div class="v">0.898</div><div class="d">字段选择 / 聚合</div></div>
+    <div class="fsep">→</div>
+    <div class="fstep"><div class="t">整体对</div><div class="v">78.8%</div><div class="d">EX 最终结果</div></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">③ 工程规模数字</div>
+  <div class="stat-row">
+    <div class="stat"><div class="v">14×18</div><div class="k">语义层治理<br>指标 × 维度</div></div>
+    <div class="stat"><div class="v">14</div><div class="k">LangGraph<br>编排节点</div></div>
+    <div class="stat"><div class="v">6 类</div><div class="k">复合计划<br>确定性模板</div></div>
+    <div class="stat"><div class="v">36 项</div><div class="k">离线回归测试<br>不依赖 LLM</div></div>
+    <div class="stat"><div class="v">29s→10s</div><div class="k">编排延迟优化<br>Span 定位驱动</div></div>
+    <div class="stat"><div class="v">10/20</div><div class="k">Spider 满分库<br>含 8 表复杂 Schema</div></div>
+  </div>
+</div>
+
+<div class="note">口径诚实声明：78.8% 为 dev 集每库采样 5 题（共 99 题）的严格判等结果，Jaccard≥0.8 的 3 题单独记"部分正确"不计入 EX；与 Spider test 集 SOTA（86-91%，普遍用 few-shot + 自我一致性）不直接可比。</div>
+
+</body>
+</html>

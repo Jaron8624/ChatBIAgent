@@ -1,0 +1,20 @@
+{
+  "name": "rag_search",
+  "description": "从知识库检索相关文档并基于检索结果回答",
+  "prompt_template": "请基于以下知识库检索结果回答用户问题。\n\n检索结果：\n{context}\n\n用户问题：{query}\n\n要求：1)基于检索结果回答 2)不编造信息 3)引用来源",
+  "examples": [
+    "用户问公司报销流程 → 检索知识库 → 基于文档回答"
+  ],
+  "input_schema": {},
+  "category": "knowledge",
+  "tags": [
+    "rag",
+    "知识库",
+    "检索"
+  ],
+  "version": "1.0.0",
+  "created_at": "2026-08-23T13:31:49.924982",
+  "updated_at": "2026-08-23T13:31:49.924988",
+  "usage_count": 0,
+  "success_rate": 1.0
+}

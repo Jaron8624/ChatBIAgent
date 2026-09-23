@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Plan with SOTA 规划执行分离</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 20px; }
+.wrap { max-width: 1000px; margin: 0 auto; }
+.phase { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px; margin-bottom: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.phase h2 { font-size: 14px; margin-bottom: 8px; }
+.p1 h2 { color: #6b21a8; } .p2 h2 { color: #1e40af; } .p3 h2 { color: #166534; }
+.plan { background: #f3e8ff; border: 1.2px solid #c4b5fd; border-radius: 8px; padding: 10px; font-size: 12px; }
+.plan .step { padding: 5px 8px; border-bottom: 1px dashed #d8b4fe; display: flex; justify-content: space-between; }
+.plan .step:last-child { border: none; }
+.plan .cap { font-size: 10.5px; color: #6b21a8; background: #ede9fe; padding: 1px 6px; border-radius: 8px; }
+.plan .risk { font-size: 10.5px; color: #991b1b; background: #fee2e2; padding: 1px 6px; border-radius: 8px; }
+.exec { display: flex; gap: 8px; }
+.exec .task { flex: 1; background: #eff6ff; border: 1.2px solid #93c5fd; border-radius: 8px; padding: 8px; font-size: 11.5px; text-align: center; }
+.exec .task .d { color: #4b5563; font-size: 10.5px; }
+.arr { text-align: center; color: #9ca3af; font-size: 18px; }
+.cost { max-width: 1000px; margin: 10px auto 0; background: #f0fdf4; border: 1.2px solid #86efac; border-radius: 10px; padding: 10px 14px; font-size: 12px; color: #166534; }
+.cost table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11.5px; }
+.cost th, .cost td { border: 1px solid #d1d5db; padding: 4px 8px; text-align: center; }
+.cost th { background: #dcfce7; }
+</style>
+</head>
+<body>
+
+<h1>Plan with SOTA：贵模型出脑、便宜模型出手</h1>
+<p class="sub">复杂任务先切 SOTA 模型做规划，再把 Plan 派发给 flash 级模型逐步执行——成本只增加一次 Plan 调用</p>
+
+<div class="wrap">
+
+<div class="phase p1">
+  <h2>阶段 ① 规划（SOTA 模型 · 1 次调用）</h2>
+  <div class="plan">
+    <div class="step"><span>Step 1：查近 6 个月各品类销售额趋势</span><span class="cap">tool: execute_sql</span></div>
+    <div class="step"><span>Step 2：检索口径文档确认"销售额"定义</span><span class="cap">rag（可与 Step 1 并行）</span></div>
+    <div class="step"><span>Step 3：环比计算 + 异常点检测 [耗时]</span><span class="cap">tool + 风险标注</span></div>
+    <div class="step"><span>Step 4：异常品类钻取根因（依赖 Step 3）</span><span class="risk">串行依赖</span></div>
+    <div class="step"><span>Step 5：汇总报告 + 建议</span><span class="cap">synthesize</span></div>
+  </div>
+</div>
+
+<div class="arr">▼ Plan 注入为系统指令 ▼</div>
+
+<div class="phase p2">
+  <h2>阶段 ② 执行（flash 模型 · 按 Plan 逐步跑）</h2>
+  <div class="exec">
+    <div class="task">Step 1+2 并行<div class="d">SQL 查询 + RAG 检索同时发</div></div>
+    <div class="task">Step 3<div class="d">大表聚合 → 按风险标注走兜底（LIMIT 采样）</div></div>
+    <div class="task">Step 4<div class="d">拿到 Step 3 结果再钻取</div></div>
+    <div class="task">Step 5<div class="d">汇总输出</div></div>
+  </div>
+</div>
+
+<div class="arr">▼</div>
+
+<div class="phase p3">
+  <h2>阶段 ③ 产出：规划质量不打折，执行成本不膨胀</h2>
+</div>
+
+<div class="cost">
+<b>成本对比（同一次复杂任务，5 步）：</b>
+<table>
+<tr><th>方案</th><th>SOTA 调用</th><th>flash 调用</th><th>相对成本</th><th>方案质量</th></tr>
+<tr><td>全程 SOTA</td><td>6 次（每步都思考）</td><td>0</td><td>≈ 6×</td><td>高</td></tr>
+<tr><td>全程 flash</td><td>0</td><td>6 次</td><td>1×</td><td>低（规划常漏步骤/依赖）</td></tr>
+<tr><td><b>Plan with SOTA</b></td><td><b>1 次（仅规划）</b></td><td>5 次（执行）</td><td><b>≈ 1.5×</b></td><td><b>接近 SOTA</b></td></tr>
+</table>
+</div>
+
+</div>
+</body>
+</html>

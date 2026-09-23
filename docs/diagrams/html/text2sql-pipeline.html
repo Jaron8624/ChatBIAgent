@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Text2SQL 两阶段编译与四层路由</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1240px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 24px; }
+  .row { display: flex; align-items: stretch; gap: 12px; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #fff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 13px 18px; box-shadow: 4px 4px 0 #bfdbfe; flex: 1;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 17px; margin-bottom: 6px; color: #1e293b; }
+  .card p, .card li { font-size: 13.4px; color: #475569; line-height: 1.65; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 12px; color: #be185d; }
+  .tag { display: inline-block; font-size: 11.5px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 6px; font-weight: 600; }
+  .green .tag { background: #ecfdf5; color: #059669; }
+  .orange .tag { background: #fffbeb; color: #d97706; }
+  .purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .gray .tag { background: #f8fafc; color: #475569; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2563eb; font-weight: 700; flex-shrink: 0; }
+  .arrow-v { text-align: center; font-size: 22px; color: #2563eb; font-weight: 700; padding: 4px 0; }
+  .section-title { font-size: 15px; font-weight: 700; color: #1e3a8a; background: #dbeafe; display: inline-block; padding: 3px 14px; border-radius: 999px; margin-bottom: 10px; width: fit-content; }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 13px 22px; margin-top: 20px; font-size: 15.5px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+  .ir { background: #f8fafc; border: 1.5px dashed #94a3b8; border-radius: 10px; padding: 8px 14px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; color: #334155; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <h1>Text2SQL：两阶段编译 + 四层路由</h1>
+  <div class="sub">核心思想："能确定的不交给概率"——已治理指标走确定性编译，只有开放问题才交给 LLM 概率生成</div>
+
+  <div class="section-title">第一阶段：理解（NL → IR）</div>
+  <div class="row">
+    <div class="card gray" style="max-width: 210px; align-self: center;">
+      <span class="tag">输入</span>
+      <h3>自然语言问题</h3>
+      <p>"最近三个月各品类销售额排名"</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card" style="max-width: 330px;">
+      <span class="tag">SchemaLinker</span>
+      <h3>三级 Schema 检索 + 要素抽取</h3>
+      <p>数据域 → 表（含已验证 JOIN）→ 字段，三级收敛出最小充分 Schema；抽取指标 / 维度 / 过滤 / 排序 / LIMIT</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card purple" style="flex: 1;">
+      <span class="tag">结构化中间表示 IR（可审查）</span>
+      <div class="ir">{ metrics: [sales_revenue],<br>&nbsp;&nbsp;dimensions: [product_category],<br>&nbsp;&nbsp;filters: [last_3_months],<br>&nbsp;&nbsp;sort: revenue_desc }</div>
+    </div>
+  </div>
+
+  <div class="arrow-v">▼ 按 IR 置信度与结构做路由决策（决策理由写入 IR，可审计）</div>
+
+  <div class="section-title">第二阶段：生成（IR → SQL），四层路由</div>
+  <div class="row">
+    <div class="card green">
+      <span class="tag">① semantic_compile 语义层编译</span>
+      <h3>单一已治理指标</h3>
+      <p>MetricPlanCompiler 按指标定义（事实表/聚合/JOIN 路径）<b>确定性组装 SQL</b>——毫秒级、零 LLM 成本、口径由代码保证</p>
+    </div>
+    <div class="card orange">
+      <span class="tag">② composite_plan 复合指标计划</span>
+      <h3>多指标 + 派生比率</h3>
+      <p>确定性 SQL 模板（共 6 类）——分子分母同口径的聚合结构固化在模板里，<b>不靠两个独立 SQL 拼接</b></p>
+    </div>
+    <div class="card purple">
+      <span class="tag">③ root_cause 根因分析</span>
+      <h3>"为什么"类问题</h3>
+      <p>假设拆解 → 并行取证查询 → 证据归因，每条结论背后有可复核的取证 SQL</p>
+    </div>
+    <div class="card">
+      <span class="tag">④ llm_fallback 开放域兜底</span>
+      <h3>未治理 / 陌生 Schema</h3>
+      <p>DDL + 外键 + 每表 3 行样本构造 Prompt 交给 LLM 生成——<b>Spider 开放域 zero-shot 靠这条路</b></p>
+    </div>
+  </div>
+
+  <div class="arrow-v">▼ 无论哪条路产出的 SQL</div>
+
+  <div class="row">
+    <div class="card" style="border-color:#0ea5e9; box-shadow: 4px 4px 0 #bae6fd; max-width: 460px;">
+      <span class="tag" style="background:#f0f9ff; color:#0284c7;">统一出口</span>
+      <h3>SQL Guard 三层防护</h3>
+      <p>AST 静态校验 → 执行自修复（≤2 轮）→ 结果合理性检查<br>四条路径的 SQL <b>都强制经过同一个守卫</b></p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card green" style="flex: 1; align-self: center;">
+      <span class="tag">产出</span>
+      <p>可信 SQL + 执行结果 + 口径说明 + 全链路 Trace 留痕（IR / 路由理由 / SQL / 告警可复核）</p>
+    </div>
+  </div>
+
+  <div class="key">一句话总结：<b>两阶段分离让中间结果可审查</b>——IR 错是"理解"的问题，SQL 错是"生成"的问题，归因才有抓手；<b>"不能编译"也是一种明确结果</b>（如维度跨数据集直接降级 LLM），比强行生成一条错误 SQL 好得多。</div>
+</body>
+</html>

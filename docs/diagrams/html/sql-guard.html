@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SQL Guard 三层防护</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1180px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 26px; }
+  .row { display: flex; align-items: stretch; gap: 14px; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #fff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 15px 20px; box-shadow: 4px 4px 0 #bfdbfe; flex: 1;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.red { border-color: #ef4444; box-shadow: 4px 4px 0 #fecaca; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 18px; margin-bottom: 7px; color: #1e293b; }
+  .card p, .card li { font-size: 13.8px; color: #475569; line-height: 1.7; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: #be185d; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 7px; font-weight: 600; }
+  .green .tag { background: #ecfdf5; color: #059669; }
+  .orange .tag { background: #fffbeb; color: #d97706; }
+  .purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .red .tag { background: #fef2f2; color: #dc2626; }
+  .gray .tag { background: #f8fafc; color: #475569; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2563eb; font-weight: 700; flex-shrink: 0; }
+  .loop {
+    margin: 14px 30px 0; padding: 10px 18px; border: 2px dashed #f59e0b; border-radius: 12px;
+    background: #fffbeb; font-size: 14px; color: #b45309; text-align: center; line-height: 1.7;
+  }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 14px 22px; margin-top: 22px; font-size: 15.5px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+  .reject { font-size: 12.5px; color: #dc2626; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>SQL Guard 三层防护</h1>
+  <div class="sub">模型生成的 SQL 不能信任到直接执行——三层防线分别覆盖<b>危险操作、执行失败、静默错误</b>三类完全不同的故障模式</div>
+
+  <div class="row">
+    <div class="card gray" style="max-width: 170px; align-self: center;">
+      <span class="tag">输入</span>
+      <h3>模型生成的 SQL</h3>
+      <p>来自语义层编译或 LLM fallback</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card" style="max-width: 310px;">
+      <span class="tag">第 1 层 · 执行之前</span>
+      <h3>静态校验（SQLValidator）</h3>
+      <p><b>sqlglot AST</b> 语句类型判定：INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/PRAGMA/ATTACH 一律拦截；多语句注入（<code>SELECT…; DROP…</code>）同样拦截</p>
+      <p style="margin-top:5px">方言函数黑名单（SQLite 禁 <code>LEFT()</code>）+ 表/列存在性校验</p>
+      <p class="reject">为什么 AST 不用正则：正则会误伤 REPLACE() 函数和含 "update" 的字符串字面量；AST 只认真正的语句节点</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card green" style="max-width: 240px; align-self: center;">
+      <span class="tag">试执行</span>
+      <h3>真实落库执行</h3>
+      <p>通过静态校验的 SQL 在数据库真实执行<br>语法对 ≠ 能跑通（类型错误等执行期才暴露）</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="card purple" style="max-width: 330px;">
+      <span class="tag">第 3 层 · 执行成功之后</span>
+      <h3>结果合理性检查</h3>
+      <p><b>可修复失败</b>（回送模型重试）：空结果、用户问 TopN 但 SQL 无 LIMIT</p>
+      <p style="margin-top:5px"><b>只告警不改 SQL</b>：行数过大未 LIMIT、列 NULL 占比 ≥50%、比率列 >100%——可能是真实业务现象，盲改口径会掩盖业务问题</p>
+    </div>
+  </div>
+
+  <div class="loop">
+    ↩ <b>第 2 层 · 执行自修复（最多 2 轮）</b>：任何一层失败时，把【报错信息 / 校验诊断 + Schema 节选】反馈给修复模型重新生成 SQL——修复提示词内置方言规则（SQLite 用 strftime 不用 LEFT）与口径规则（比率要核对分子分母同口径、保持原查询意图不变），修复后的 SQL <b>重新从第 1 层开始过检</b>。
+  </div>
+
+  <div class="row" style="margin-top: 16px;">
+    <div class="card orange" style="flex: 1;">
+      <span class="tag">真实修复案例</span>
+      <p>模型生成 <code>LEFT(customer_state, 2)</code>（SQLite 不支持）→ 静态校验命中方言黑名单 → 反馈修复 → 产出 <code>substr(customer_state, 1, 2)</code> → 重新过检 → 执行成功</p>
+    </div>
+    <div class="card red" style="flex: 1;">
+      <span class="tag">兜底：越修越偏怎么办</span>
+      <p>轮次上限 2 轮，修不好如实把告警抛给上层展示，<b>不无限循环</b>；意图保持约束防止修复跑偏题</p>
+    </div>
+  </div>
+
+  <div class="key">一句话总结：三层各防一类病——<b>静态校验防危险、自修复防跑不通、合理性检查防"能跑但结果是错的"</b>。实际事故里三类都真实出现过，少一层都不行。</div>
+</body>
+</html>

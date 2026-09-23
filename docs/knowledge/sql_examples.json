@@ -1,0 +1,58 @@
+[
+  {
+    "question": "各州订单量排名",
+    "intent": "data_query",
+    "tags": [
+      "订单",
+      "州",
+      "排名"
+    ],
+    "sql": "SELECT c.customer_state, COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON o.customer_id=c.customer_id GROUP BY c.customer_state ORDER BY order_count DESC",
+    "rationale": "订单量必须 COUNT DISTINCT order_id，客户地域通过 orders→customers 连接。",
+    "source": "seed"
+  },
+  {
+    "question": "各品类销售额排名",
+    "intent": "data_query",
+    "tags": [
+      "品类",
+      "销售额",
+      "排名"
+    ],
+    "sql": "SELECT t.product_name_english, SUM(i.price) AS sales_revenue FROM olist_order_items_dataset i JOIN olist_products_dataset p ON i.product_id=p.product_id LEFT JOIN product_category_name_translation t ON p.product_category_name=t.product_category_name GROUP BY t.product_name_english ORDER BY sales_revenue DESC",
+    "rationale": "商品销售额按订单明细 price 聚合，品类要经 products 和 translation 映射。",
+    "source": "seed"
+  },
+  {
+    "question": "各流派收入排名",
+    "intent": "data_query",
+    "tags": [
+      "流派",
+      "收入",
+      "音乐"
+    ],
+    "sql": "SELECT g.Name AS genre, SUM(il.UnitPrice * il.Quantity) AS revenue FROM chinook.InvoiceLine il JOIN chinook.Track t ON il.TrackId=t.TrackId JOIN chinook.Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY revenue DESC",
+    "rationale": "Chinook 收入使用 InvoiceLine 的 UnitPrice×Quantity，必须显式限定表别名避免 UnitPrice 歧义。",
+    "source": "seed"
+  },
+  {
+    "question": "Olist 各品类的销售额排名（显示英文品类名）",
+    "sql": "SELECT pcm.product_name_english AS category_name,\n       ROUND(SUM(oi.price), 2) AS sales_amount\nFROM olist_order_items_dataset oi\nJOIN olist_products_dataset p ON oi.product_id = p.product_id\nJOIN product_category_name_translation pcm ON p.product_category_name = pcm.product_category_name\nGROUP BY pcm.product_name_english\nORDER BY sales_amount DESC",
+    "intent": "data_query",
+    "rationale": "Bad Case 闭环修复：经三级 Schema 检索 + SQL 守卫验证。",
+    "tags": [
+      "Olist 各品"
+    ],
+    "source": "bad_case_closed_loop"
+  },
+  {
+    "question": "Chinook 各流派的曲目数量排名",
+    "sql": "SELECT chinook.Genre.Name AS genre_name, COUNT(*) AS track_count\nFROM chinook.Track\nJOIN chinook.Genre USING(GenreId)\nGROUP BY chinook.Genre.Name\nORDER BY track_count DESC",
+    "intent": "data_query",
+    "rationale": "Bad Case 闭环修复：经三级 Schema 检索 + SQL 守卫验证。",
+    "tags": [
+      "Chinook "
+    ],
+    "source": "bad_case_closed_loop"
+  }
+]

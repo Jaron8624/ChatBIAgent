@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NexusMind 全局架构图</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 18px; color: #111827; }
+.layer { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; margin: 10px auto; padding: 12px 14px; max-width: 1100px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.layer-title { font-size: 13px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.layer-title::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.box { background: #eff6ff; border: 1.2px solid #93c5fd; border-radius: 8px; padding: 9px 11px; font-size: 12.5px; min-width: 130px; max-width: 190px; text-align: center; }
+.box .t { font-weight: 700; color: #1e40af; margin-bottom: 3px; }
+.box .d { color: #4b5563; font-size: 11px; line-height: 1.4; }
+.box.alt { background: #fef3c7; border-color: #fbbf24; }
+.box.alt .t { color: #92400e; }
+.box.ok { background: #dcfce7; border-color: #86efac; }
+.box.ok .t { color: #166534; }
+.box.purple { background: #f3e8ff; border-color: #c4b5fd; }
+.box.purple .t { color: #6b21a8; }
+.box.gray { background: #f3f4f6; border-color: #d1d5db; }
+.box.gray .t { color: #374151; }
+.box.danger { background: #fee2e2; border-color: #fca5a5; }
+.box.danger .t { color: #991b1b; }
+.arrow { text-align: center; font-size: 20px; color: #9ca3af; margin: 2px 0; }
+.sub { font-size: 10.5px; color: #6b7280; margin-top: 6px; text-align: center; }
+.pipeline { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }
+.step { background: #eff6ff; border: 1px solid #93c5fd; border-radius: 6px; padding: 7px 9px; font-size: 11.5px; min-width: 90px; text-align: center; }
+.step.hi { background: #fef3c7; border-color: #fbbf24; }
+.step.guard { background: #fee2e2; border-color: #fca5a5; }
+.sep { color: #9ca3af; font-size: 16px; }
+</style>
+</head>
+<body>
+
+<h1>NexusMind 全局架构图（用户问题 → 回复 全链路）</h1>
+
+<!-- 入口 -->
+<div class="layer">
+  <div class="layer-title" style="color:#1e40af;">入口：用户提问</div>
+  <div class="row">
+    <div class="box gray"><div class="t">用户问题</div><div class="d">"上季度华东区销售对比同期下降多少？帮我分析原因"</div></div>
+    <div class="box ok"><div class="t">Redis 会话快照</div><div class="d">读取 session_id 历史 multi-turn 上下文</div></div>
+  </div>
+</div>
+
+<div class="arrow">▼</div>
+
+<!-- 前置：组装 + 意图 -->
+<div class="layer">
+  <div class="layer-title" style="color:#92400e;">前置编排层 · 意图路由</div>
+  <div class="row">
+    <div class="box alt"><div class="t">QueryRewriter 上下文聚合</div><div class="d">代词消解 / 多轮拼接 → 完整 query</div></div>
+    <div class="box alt"><div class="t">意图识别 · 三路融合</div><div class="d">规则 + LLM + 历史 → WeightedVoter 加权投票</div></div>
+    <div class="box alt"><div class="t">Supervisor 分流</div><div class="d">意图 → LangGraph 边路由到四种 Agent 模式</div></div>
+  </div>
+</div>
+
+<div class="arrow">▼ 四模式并行 ▼</div>
+
+<!-- 四模式 -->
+<div class="layer">
+  <div class="layer-title" style="color:#6b21a8;">多智能体编排层 · 四种 Agent 模式（LangGraph StateGraph）</div>
+  <div class="row">
+    <div class="box purple"><div class="t">① 直接回答</div><div class="d">闲聊/常识 · 不走 BI</div></div>
+    <div class="box purple"><div class="t">② NL 编译</div><div class="d">标准取数问题 · 进入 ChatBI 主链路</div></div>
+    <div class="box purple"><div class="t">③ Coordinator 协调</div><div class="d">需多步串联（取数→分析→建议）</div></div>
+    <div class="box purple"><div class="t">④ ReAct 循环</div><div class="d">自主 MCP 工具调用 + 反思</div></div>
+  </div>
+</div>
+
+<div class="arrow">▼ ② 主链路 ▼</div>
+
+<!-- ChatBI 主链路 -->
+<div class="layer">
+  <div class="layer-title" style="color:#1e40af;">ChatBI 链路层 · Text2SQL 两阶段编译</div>
+  <div class="pipeline">
+    <div class="step">SchemaLinker<br><span style="color:#6b7280">三级检索</span></div>
+    <div class="sep">→</div>
+    <div class="step">NL→IR<br><span style="color:#6b7280">中间表示</span></div>
+    <div class="sep">→</div>
+    <div class="step hi">四层路由<br><span style="color:#92400e">精确/语义/根因/LLM</span></div>
+    <div class="sep">→</div>
+    <div class="step">语义编译器<br><span style="color:#6b7280">IR→SQL 模板</span></div>
+    <div class="sep">→</div>
+    <div class="step guard">SQL Guard<br><span style="color:#991b1b">静态/执行/修复/校验</span></div>
+    <div class="sep">→</div>
+    <div class="step">执行 + 取数</div>
+  </div>
+</div>
+
+<div class="arrow">▼ 支撑层 ▼</div>
+
+<!-- 支撑能力 -->
+<div class="layer">
+  <div class="layer-title" style="color:#166534;">能力支撑层 · 三大引擎 + 工具协议</div>
+  <div class="row">
+    <div class="box ok"><div class="t">三级记忆引擎</div><div class="d">Milvus · 工作/情景/语义 三级分层检索 · 冲突归并</div></div>
+    <div class="box ok"><div class="t">RAG 知识库</div><div class="d">父子块 + BM25/向量混合 + RRF + Rerank</div></div>
+    <div class="box ok"><div class="t">MCP 工具层</div><div class="d">自研 JSON-RPC 2.0 · 内置 execute_sql / recall_context · 外部 stdio 接入</div></div>
+    <div class="box ok"><div class="t">上下文管理</div><div class="d">ContextStore 大块存档 · recall_context 按需回忆</div></div>
+  </div>
+</div>
+
+<div class="arrow">▼ 回流合成 ▼</div>
+
+<!-- 合成 -->
+<div class="layer">
+  <div class="layer-title" style="color:#6b21a8;">合成与反思层</div>
+  <div class="row">
+    <div class="box purple"><div class="t">结果合成</div><div class="d">数据 + 分析 + 自然语言解释</div></div>
+    <div class="box purple"><div class="t">Reflection + Advisor</div><div class="d">自查结论合理性 · 必要回炉</div></div>
+    <div class="box purple"><div class="t">回答用户</div><div class="d">同时写回三级记忆 / Redis 快照</div></div>
+  </div>
+</div>
+
+<div class="arrow">▼ 闭环 ▼</div>
+
+<!-- 治理层 -->
+<div class="layer">
+  <div class="layer-title" style="color:#991b1b;">治理与自进化层 · 离线 + 在线闭环</div>
+  <div class="row">
+    <div class="box danger"><div class="t">MetricsCollector</div><div class="d">命中率/延迟/SQL 通过率 在线埋点</div></div>
+    <div class="box danger"><div class="t">SlidingWindow · p99</div><div class="d">滑动窗口聚合 · p99 延迟监控</div></div>
+    <div class="box danger"><div class="t">WeightAdjuster</div><div class="d">命中↑权重↑ · p99↑权重↓ 动态调权</div></div>
+    <div class="box danger"><div class="t">TraceStore + BadCase</div><div class="d">失败链路回放 · 离线蒸馏反哺提示词</div></div>
+  </div>
+</div>
+
+<p class="sub">↑ 整条链路：用户问题 → 意图路由 → 四模式 → ChatBI 两阶段编译 → SQL Guard → 三大引擎支撑 → 合成反思 → 治理闭环权重自进化 ↑</p>
+
+</body>
+</html>

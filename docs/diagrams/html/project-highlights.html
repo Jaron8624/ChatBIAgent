@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NexusMind 项目亮点总览</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+.hero { text-align: center; margin-bottom: 16px; }
+.hero h1 { font-size: 26px; color: #111827; margin-bottom: 6px; }
+.hero .tagline { font-size: 14px; color: #4b5563; }
+.hero .principle { display: inline-block; margin-top: 10px; background: #1e40af; color: #fff; font-size: 14px; font-weight: 700; padding: 7px 18px; border-radius: 999px; letter-spacing: 1px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 1150px; margin: 0 auto; }
+.card { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px 15px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.card .no { font-size: 11px; font-weight: 700; color: #9ca3af; letter-spacing: 1px; }
+.card .t { font-size: 15px; font-weight: 700; margin: 3px 0 6px; }
+.card .d { font-size: 12px; color: #4b5563; line-height: 1.55; }
+.card .metric { margin-top: 8px; font-size: 11.5px; font-weight: 700; padding: 4px 8px; border-radius: 6px; display: inline-block; }
+.c-blue { border-top: 4px solid #3b82f6; } .c-blue .t { color: #1e40af; } .c-blue .metric { background: #eff6ff; color: #1e40af; }
+.c-amber { border-top: 4px solid #f59e0b; } .c-amber .t { color: #92400e; } .c-amber .metric { background: #fef3c7; color: #92400e; }
+.c-green { border-top: 4px solid #22c55e; } .c-green .t { color: #166534; } .c-green .metric { background: #dcfce7; color: #166534; }
+.c-purple { border-top: 4px solid #a855f7; } .c-purple .t { color: #6b21a8; } .c-purple .metric { background: #f3e8ff; color: #6b21a8; }
+.c-red { border-top: 4px solid #ef4444; } .c-red .t { color: #991b1b; } .c-red .metric { background: #fee2e2; color: #991b1b; }
+.c-cyan { border-top: 4px solid #06b6d4; } .c-cyan .t { color: #155e75; } .c-cyan .metric { background: #cffafe; color: #155e75; }
+.footer { text-align: center; font-size: 11.5px; color: #6b7280; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>NexusMind · 语义驱动的多智能体 ChatBI</h1>
+  <div class="tagline">让业务人员用自然语言完成<b>可信</b>的数据查询、指标分析与异动归因</div>
+  <div class="principle">设计主线：能确定的不交给概率</div>
+</div>
+
+<div class="grid">
+  <div class="card c-blue">
+    <div class="no">HIGHLIGHT 01</div>
+    <div class="t">语义层确定性编译</div>
+    <div class="d">14 个业务指标 × 18 个维度的口径、JOIN 路径、聚合逻辑固化为可审计代码。命中已治理指标的问题不经过 LLM 概率生成，同一问题今天和明天答案一致。</div>
+    <div class="metric">口径可审计 · 零幻觉</div>
+  </div>
+  <div class="card c-amber">
+    <div class="t" style="margin-top:0"><span class="no">HIGHLIGHT 02</span></div>
+    <div class="t">SQL Guard 三层防护</div>
+    <div class="d">AST 静态校验（只读/方言/表列存在性）→ 执行失败 LLM 自修复（≤2 轮）→ 结果合理性检查（空结果/TopN 无 LIMIT/NULL 占比/比率越界），拦截"可执行但不可信"的静默错误。</div>
+    <div class="metric">SQL 一次通过率 90%+</div>
+  </div>
+  <div class="card c-purple">
+    <div class="no">HIGHLIGHT 03</div>
+    <div class="t">LangGraph 四种编排模式</div>
+    <div class="d">Supervisor 快速路由 / ReAct 工具循环 / Coordinator 并行拆解 / Reflection + Advisor 定向重试，复杂任务 Plan with SOTA（强模型规划、快模型执行）。</div>
+    <div class="metric">14 节点 StateGraph</div>
+  </div>
+  <div class="card c-green">
+    <div class="no">HIGHLIGHT 04</div>
+    <div class="t">混合检索全链路</div>
+    <div class="d">父子块切分 + 稠密向量与 BM25 双路召回 + RRF 融合 + Rerank 精排，每一层都有降级路径。Schema 三级检索（域→表→字段）支撑开放域 97.0% 表命中率。</div>
+    <div class="metric">表命中率 97.0%</div>
+  </div>
+  <div class="card c-cyan">
+    <div class="no">HIGHLIGHT 05</div>
+    <div class="t">上下文管理三件套</div>
+    <div class="d">三段式模板组装 + Token 阈值自动压缩（system 永不压缩、切分点回溯防拆 tool 对）+ ContextStore 存档与 recall_context 按需回忆——截断丢信息变成可检索的延迟加载。</div>
+    <div class="metric">压缩 8200 → 1900 tokens</div>
+  </div>
+  <div class="card c-red">
+    <div class="no">HIGHLIGHT 06</div>
+    <div class="t">治理与自进化闭环</div>
+    <div class="d">Monitor 滑动窗口 p99/成功率在线调路由权重；MTrace 风格 Span 全链路追踪；Bad Case 自动采样 → LLM 抽取规则 → 双阈值沉淀为 Skill，系统越用越准。</div>
+    <div class="metric">编排延迟 29s → 10s</div>
+  </div>
+</div>
+
+<div class="footer">底座：自研 MCP JSON-RPC 2.0 协议层（stdio / Streamable HTTP 双传输） · 三级分层记忆（Milvus HNSW + BM25） · Redis 会话快照</div>
+
+</body>
+</html>

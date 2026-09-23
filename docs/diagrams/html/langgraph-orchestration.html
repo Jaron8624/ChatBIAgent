@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LangGraph 多智能体编排</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1240px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 24px; }
+  .row { display: flex; align-items: stretch; gap: 12px; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #fff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 13px 17px; box-shadow: 4px 4px 0 #bfdbfe; flex: 1;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.pink { border-color: #ec4899; box-shadow: 4px 4px 0 #fbcfe8; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 16.5px; margin-bottom: 5px; color: #1e293b; }
+  .card p, .card li { font-size: 13.2px; color: #475569; line-height: 1.65; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 12px; color: #be185d; }
+  .tag { display: inline-block; font-size: 11.5px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 6px; font-weight: 600; }
+  .green .tag { background: #ecfdf5; color: #059669; }
+  .orange .tag { background: #fffbeb; color: #d97706; }
+  .purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .pink .tag { background: #fdf2f8; color: #db2777; }
+  .gray .tag { background: #f8fafc; color: #475569; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2563eb; font-weight: 700; flex-shrink: 0; }
+  .arrow-v { text-align: center; font-size: 22px; color: #2563eb; font-weight: 700; padding: 4px 0; }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 13px 22px; margin-top: 20px; font-size: 15.5px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+  .hub { background: #1e3a8a; color: #fff; border-radius: 16px; padding: 18px 24px; text-align: center; align-self: center; width: 210px; box-shadow: 4px 4px 0 #93c5fd; }
+  .hub h3 { color: #fff; font-size: 19px; margin-bottom: 5px; }
+  .hub p { color: #bfdbfe; font-size: 13px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <h1>LangGraph 多智能体编排：14 节点 StateGraph</h1>
+  <div class="sub">Supervisor 按问题复杂度把请求分流到四种编排模式——简单问题不浪费多轮推理，复杂任务不委屈快速通道</div>
+
+  <div class="row">
+    <div class="card gray" style="max-width: 165px; align-self: center;">
+      <span class="tag">入口</span>
+      <h3>用户问题</h3>
+      <p>+ 记忆检索<br>+ Schema 证据</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="hub">
+      <h3>Supervisor</h3>
+      <p>首层路由节点<br>条件边声明式分发</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="col" style="flex: 1;">
+      <div class="card green">
+        <span class="tag">模式 ① Supervisor 快速路由</span>
+        <h3>direct / nl_compile</h3>
+        <p>简单直接查询：一次路由一次执行，不进任何循环<br><b>用最低延迟解决最高频问题</b>（"经济舱通道"）</p>
+      </div>
+      <div class="card">
+        <span class="tag">模式 ② ReAct 事件驱动循环</span>
+        <h3>react_loop</h3>
+        <p>复合查询（一句话多个诉求）：思考→调工具→观察→再思考<br>保护：<b>签名去重</b>防重复烧钱 + <b>迭代上限 5 轮</b>防死循环</p>
+      </div>
+      <div class="card orange">
+        <span class="tag">模式 ③ Coordinator 并行拆解</span>
+        <h3>coordinate → workers</h3>
+        <p>跨模块任务拆成 2-4 个独立子任务，<code>asyncio.gather</code> 并行<br>拆解用强模型、执行用专职 Worker；非法 Worker 白名单过滤</p>
+      </div>
+      <div class="card purple">
+        <span class="tag">模式 ④ Plan with SOTA</span>
+        <h3>plan</h3>
+        <p>复杂任务先由 SOTA 模型出计划（步骤/能力/依赖/风险点）<br>再派发 flash 模型执行——<b>事前规划，成本只加一次 Plan</b></p>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="col" style="width: 235px;">
+      <div class="card" style="border-color:#0ea5e9; box-shadow: 4px 4px 0 #bae6fd;">
+        <span class="tag" style="background:#f0f9ff; color:#0284c7;">汇总</span>
+        <h3>synthesize</h3>
+        <p>各模式产物统一汇总为最终回答</p>
+      </div>
+      <div class="card pink">
+        <span class="tag">质量闸口 · Reflection + Advisor</span>
+        <p>审查不通过 → 先请 SOTA Advisor 三段式诊断（问题/方向/注意事项）→ <b>有指导地定向重试</b>；Advisor 挂了降级普通重试</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="key">一句话总结：<b>不是所有问题都值得让 Agent 思考五轮</b>——按复杂度分流，每一层的职责和成本都可控；每个增强组件（Advisor / 外部 MCP / Rerank）都假设自己会挂，底线能力不依赖任何一个。</div>
+</body>
+</html>

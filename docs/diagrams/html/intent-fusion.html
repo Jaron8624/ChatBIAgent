@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>意图识别三路融合</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; color: #111827; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 20px; }
+.wrap { max-width: 1020px; margin: 0 auto; }
+.row { display: flex; gap: 14px; justify-content: center; margin-bottom: 6px; }
+.card { flex: 1; max-width: 300px; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.card .tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; display: inline-block; margin-bottom: 6px; }
+.card h3 { font-size: 14px; margin-bottom: 6px; }
+.card p { font-size: 11.5px; color: #4b5563; line-height: 1.5; }
+.card .w { text-align: center; font-size: 22px; font-weight: 800; margin: 6px 0; }
+.c1 h3, .c1 .w { color: #1e40af; } .c1 .tag { background: #dbeafe; color: #1e40af; }
+.c2 h3, .c2 .w { color: #6b21a8; } .c2 .tag { background: #f3e8ff; color: #6b21a8; }
+.c3 h3, .c3 .w { color: #92400e; } .c3 .tag { background: #fef3c7; color: #92400e; }
+.arrow { text-align: center; color: #9ca3af; font-size: 18px; }
+.fusion { background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-top: 6px; }
+.fusion h3 { text-align: center; font-size: 15px; color: #166534; margin-bottom: 10px; }
+.rules { display: flex; gap: 10px; margin-bottom: 10px; }
+.rule { flex: 1; background: #fef2f2; border: 1.2px solid #fca5a5; border-radius: 8px; padding: 8px 10px; font-size: 11.5px; }
+.rule .t { font-weight: 700; color: #991b1b; margin-bottom: 3px; }
+.rule .d { color: #4b5563; line-height: 1.45; }
+.calc { background: #f0fdf4; border: 1.2px solid #86efac; border-radius: 8px; padding: 10px; font-size: 12px; }
+.calc .t { font-weight: 700; color: #166534; margin-bottom: 4px; }
+.calc table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.calc th, .calc td { border: 1px solid #d1d5db; padding: 4px 8px; text-align: center; }
+.calc th { background: #dcfce7; color: #166534; }
+.branches { display: flex; gap: 12px; justify-content: center; margin-top: 6px; }
+.branch { flex: 1; max-width: 480px; border-radius: 8px; padding: 10px; font-size: 12px; text-align: center; }
+.branch.ok { background: #dcfce7; border: 1.2px solid #86efac; color: #166534; }
+.branch.no { background: #fef9c3; border: 1.2px solid #facc15; color: #854d0e; }
+.note { font-size: 11px; color: #6b7280; text-align: center; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>意图识别：三路并行 + 仲裁规则 + 加权投票</h1>
+<p class="sub">规则通道 0.3 · LLM 通道 0.5 · 历史通道 0.2 → 三条仲裁规则先行 → 加权投票 → 低于阈值则澄清</p>
+
+<div class="wrap">
+
+<div class="row">
+  <div class="card c1">
+    <span class="tag">规则通道</span>
+    <h3>正则 / 关键词匹配</h3>
+    <div class="w">0.3</div>
+    <p>零成本零延迟。命中"为什么…下降"→ 根因分析（置信 1.0）；命中"什么是…"→ 知识咨询。覆盖高频明确意图，但口语化表述会漏。</p>
+  </div>
+  <div class="card c2">
+    <span class="tag">LLM 通道</span>
+    <h3>大模型语义理解</h3>
+    <div class="w">0.5</div>
+    <p>权重最高。覆盖口语化、模糊表述（"帮我瞅瞅最近生意咋样"→ 趋势分析）。偶发解析失败返回 unknown，靠规则通道兜底。</p>
+  </div>
+  <div class="card c3">
+    <span class="tag">历史通道</span>
+    <h3>近期会话意图模式</h3>
+    <div class="w">0.2</div>
+    <p>处理强上下文依赖："再来一单类似的""那上个月呢"——单看当前句无意图，历史通道从上几轮意图继承。</p>
+  </div>
+</div>
+
+<div class="arrow">▼ 三路输出 {intent, confidence} 汇入 ▼</div>
+
+<div class="fusion">
+  <h3>WeightedVoter 融合：先仲裁、再投票</h3>
+  <div class="rules">
+    <div class="rule"><div class="t">规则 1 · 规则满置信直通</div><div class="d">规则置信 ≥0.99 且 LLM 为 unknown 或一致 → 直接采信规则。防 LLM 解析失败稀释满置信命中。</div></div>
+    <div class="rule"><div class="t">规则 2 · 业务意图优先</div><div class="d">规则满置信命中根因/趋势/对比，而 LLM 给通用意图 → 采信规则。误路由到 RAG 会丢失工具调用拿不到实时数据。</div></div>
+    <div class="rule"><div class="t">规则 3 · 知识咨询镜像</div><div class="d">规则命中"什么是/定义"类标记，而 LLM 给业务意图 → 采信规则走知识库，不拿数据查询接概念咨询。</div></div>
+  </div>
+  <div class="calc">
+    <div class="t">三条都不命中 → 加权投票（示例：query="帮我分析下为什么上月销量跌了"）</div>
+    <table>
+      <tr><th>通道</th><th>输出意图</th><th>置信度</th><th>权重</th><th>加权分</th></tr>
+      <tr><td>规则</td><td>root_cause</td><td>0.90</td><td>0.3</td><td>0.27</td></tr>
+      <tr><td>LLM</td><td>root_cause</td><td>0.85</td><td>0.5</td><td>0.425</td></tr>
+      <tr><td>历史</td><td>trend</td><td>0.60</td><td>0.2</td><td>0.12</td></tr>
+    </table>
+    <p style="margin-top:6px; color:#166534;">root_cause 得分 = 0.27 + 0.425 = <b>0.695</b> ≥ 阈值 0.4 → 路由到根因分析规划链</p>
+  </div>
+</div>
+
+<div class="arrow">▼ 投票结果 ▼</div>
+
+<div class="branches">
+  <div class="branch ok">得分 ≥ 0.4 → 路由到对应 Agent 模式（ Supervisor 边路由 ）</div>
+  <div class="branch no">得分 &lt; 0.4 → 不强行路由，返回澄清问题："您是想了解'趋势分析'相关内容吗？"</div>
+</div>
+
+<p class="note">权重非静态：Monitor 按各通道历史准确率在线归一化调整（update_weight 回调）；融合阈值曾踩过"0.6 高于 LLM 单通道理论上限 0.5"的悖论 bug，修正为 0.4 并固化回归测试。</p>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "memory_recall",
+  "description": "调用用户历史记忆，提供个性化回答",
+  "prompt_template": "用户历史记忆：\n{memories}\n\n请结合用户的历史偏好和习惯回答当前问题。",
+  "examples": [
+    "用户喜欢简洁回答 → 保持简洁风格"
+  ],
+  "input_schema": {},
+  "category": "memory",
+  "tags": [
+    "记忆",
+    "个性化"
+  ],
+  "version": "1.0.0",
+  "created_at": "2026-08-23T13:31:49.924990",
+  "updated_at": "2026-08-23T13:31:49.924991",
+  "usage_count": 0,
+  "success_rate": 1.0
+}

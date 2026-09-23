@@ -1,0 +1,20 @@
+{
+  "name": "code_review",
+  "description": "审查代码质量、潜在 bug 和优化建议",
+  "prompt_template": "请审查以下代码：\n\n```\n{code}\n```\n\n从可读性、性能、安全性、最佳实践四个维度给出评价。",
+  "examples": [
+    "审查 Python 函数 → 指出内存泄漏风险"
+  ],
+  "input_schema": {},
+  "category": "development",
+  "tags": [
+    "代码",
+    "审查",
+    "开发"
+  ],
+  "version": "1.0.0",
+  "created_at": "2026-08-25T15:20:09.768494",
+  "updated_at": "2026-08-25T15:20:09.768495",
+  "usage_count": 0,
+  "success_rate": 1.0
+}

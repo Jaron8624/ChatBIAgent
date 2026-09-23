@@ -1,0 +1,519 @@
+{
+  "phase": "v3",
+  "model": "deepseek-v4-flash",
+  "total_cases": 15,
+  "timestamp": "2026-08-25T17:36:26",
+  "summary": {
+    "execution_accuracy": "6/15 (40.0%)",
+    "schema_linking": "15/15 (100.0%)",
+    "intent_recognition": "9/15 (60.0%)",
+    "judge_avg_score": 4.9,
+    "judge_pass_rate": "4/12 (33.3%)",
+    "field_level": {
+      "avg_row_recall": 0.5541,
+      "avg_cell_accuracy": 0.6,
+      "column_all_hit": "3/15"
+    }
+  },
+  "by_difficulty": {
+    "simple": {
+      "count": 4,
+      "ex_pass": 3,
+      "sl_pass": 4,
+      "intent_pass": 4,
+      "judge_avg": 4.3
+    },
+    "moderate": {
+      "count": 4,
+      "ex_pass": 3,
+      "sl_pass": 4,
+      "intent_pass": 4,
+      "judge_avg": 6.5
+    },
+    "challenging": {
+      "count": 4,
+      "ex_pass": 0,
+      "sl_pass": 4,
+      "intent_pass": 1,
+      "judge_avg": 5.0
+    },
+    "compound": {
+      "count": 3,
+      "ex_pass": 0,
+      "sl_pass": 3,
+      "intent_pass": 0,
+      "judge_avg": 3.3
+    }
+  },
+  "results": [
+    {
+      "id": "s1_olist_state_orders",
+      "difficulty": "simple",
+      "question": "Olist 各州的订单数量是多少？",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT c.customer_state, COUNT(*) AS order_count\nFROM olist_orders_dataset o\nJOIN olist_customers_dataset c ON o.customer_id = c.customer_id\nGROUP BY c.customer_state",
+      "gold_sql": "SELECT c.customer_state, COUNT(*) AS orders FROM olist_orders_dataset o JOIN olist_customers_dataset c ON o.customer_id = c.customer_id GROUP BY c.customer_state ORDER BY orders DESC",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (13 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": true,
+          "missing_columns": [],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 4,
+        "judge_completeness": 2,
+        "judge_clarity": 3,
+        "judge_insight": 1,
+        "judge_overall": 3,
+        "judge_notes": "给出的5个州数据正确，但远不完整，未覆盖所有州；结果缺乏表头和排序，未提供任何额外分析。"
+      }
+    },
+    {
+      "id": "s2_chinook_genre_count",
+      "difficulty": "simple",
+      "question": "Chinook 有多少种音乐流派？",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT COUNT(*) FROM chinook.Genre",
+      "gold_sql": "SELECT COUNT(*) AS genre_count FROM chinook.Genre",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (1 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "genre"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 10,
+        "judge_clarity": 8,
+        "judge_insight": 1,
+        "judge_overall": 7,
+        "judge_notes": "回答准确且完整，直接给出数量25，清晰易懂；但缺乏额外解读或上下文，洞察深度不足。"
+      }
+    },
+    {
+      "id": "s3_olist_unique_customers",
+      "difficulty": "simple",
+      "question": "Olist 有多少个不同的回头客户？",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT COUNT(*) AS repeat_customer_count\nFROM (\n    SELECT c.customer_unique_id\n    FROM olist_orders_dataset o\n    JOIN olist_customers_dataset c ON o.customer_id = c.customer_id\n    GROUP BY c.customer_unique_id\n    HAVING COUNT(*) > 1\n) AS repeat_customers",
+      "gold_sql": "SELECT COUNT(DISTINCT customer_unique_id) AS unique_customers FROM olist_customers_dataset",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=2)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "unique_customer"
+          ],
+          "row_recall": 0.0,
+          "cell_accuracy": 0.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 0,
+        "judge_completeness": 0,
+        "judge_clarity": 0,
+        "judge_insight": 0,
+        "judge_overall": 0,
+        "judge_notes": ""
+      }
+    },
+    {
+      "id": "s4_chinook_country_invoices",
+      "difficulty": "simple",
+      "question": "Chinook 各国家的发票数量是多少？",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT chinook.Invoice.BillingCountry AS country, COUNT(*) AS invoice_count\nFROM chinook.Invoice\nGROUP BY chinook.Invoice.BillingCountry",
+      "gold_sql": "SELECT BillingCountry, COUNT(*) AS invoices FROM chinook.Invoice GROUP BY BillingCountry ORDER BY invoices DESC",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (24 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "billingcountry"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 4,
+        "judge_completeness": 1,
+        "judge_clarity": 5,
+        "judge_insight": 1,
+        "judge_overall": 3,
+        "judge_notes": "回答仅列出5个国家的数据，且未按发票数排序或展示全部国家，缺少对主要国家的覆盖；虽然列出的巴西数量与参考一致，但远未完整回答用户问题。建议返回完整结果并按计数降序排列。"
+      }
+    },
+    {
+      "id": "m1_olist_category_revenue",
+      "difficulty": "moderate",
+      "question": "Olist 各品类的销售额排名（显示英文品类名）",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT pcm.product_name_english AS category_name,\n       ROUND(SUM(oi.price), 2) AS sales_amount\nFROM olist_order_items_dataset oi\nJOIN olist_products_dataset p ON oi.product_id = p.product_id\nJOIN product_category_name_translation pcm ON p.product_category_name = pcm.product_category_name\nGROUP BY pcm.product_name_english\nORDER BY sales_amount DESC",
+      "gold_sql": "SELECT t.product_name_english AS category, ROUND(SUM(oi.price), 2) AS revenue FROM olist_order_items_dataset oi JOIN olist_products_dataset p ON oi.product_id = p.product_id JOIN product_category_name_translation t ON p.product_category_name = t.product_category_name GROUP BY t.product_name_english ORDER BY revenue DESC",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (20 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "category",
+            "revenue"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 4,
+        "judge_clarity": 7,
+        "judge_insight": 1,
+        "judge_overall": 5,
+        "judge_notes": "数据正确，但仅展示前5名，未完整回答所有品类，且缺少分析解读。"
+      }
+    },
+    {
+      "id": "m2_chinook_genre_tracks",
+      "difficulty": "moderate",
+      "question": "Chinook 各流派的曲目数量排名",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT chinook.Genre.Name AS genre_name, COUNT(*) AS track_count\nFROM chinook.Track\nJOIN chinook.Genre USING(GenreId)\nGROUP BY chinook.Genre.Name\nORDER BY track_count DESC",
+      "gold_sql": "SELECT g.Name AS genre, COUNT(t.TrackId) AS tracks FROM chinook.Genre g JOIN chinook.Track t ON g.GenreId = t.GenreId GROUP BY g.Name ORDER BY tracks DESC",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (25 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "genre"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 4,
+        "judge_clarity": 8,
+        "judge_insight": 2,
+        "judge_overall": 6,
+        "judge_notes": "数据完全正确，但只展示了前5名，未完整回答所有流派的排名；清晰度尚可，但缺乏进一步分析。"
+      }
+    },
+    {
+      "id": "m3_olist_payment_stats",
+      "difficulty": "moderate",
+      "question": "Olist 各支付方式的订单数量和平均金额",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT payment_type, COUNT(DISTINCT order_id) AS order_count, ROUND(AVG(payment_value), 2) AS avg_amount FROM olist_order_payments_dataset GROUP BY payment_type",
+      "gold_sql": "SELECT payment_type, COUNT(*) AS count, ROUND(AVG(payment_value), 2) AS avg_value FROM olist_order_payments_dataset GROUP BY payment_type ORDER BY count DESC",
+      "metrics": {
+        "execution_accuracy": true,
+        "ex_detail": "Exact match (4 rows)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "count",
+            "value"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 10,
+        "judge_clarity": 7,
+        "judge_insight": 1,
+        "judge_overall": 7,
+        "judge_notes": "数据准确且完整，但回答以嵌套数组形式呈现，缺少表头或结构化展示，且未提供任何额外分析或洞察。"
+      }
+    },
+    {
+      "id": "m4_chinook_top_artists",
+      "difficulty": "moderate",
+      "question": "Chinook 销售额最高的 5 个艺术家",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT chinook.Artist.Name AS artist_name, SUM(chinook.InvoiceLine.UnitPrice * chinook.InvoiceLine.Quantity) AS total_sales\nFROM chinook.InvoiceLine\nJOIN chinook.Track USING(TrackId)\nJOIN chinook.Album USING(AlbumId)\nJOIN chinook.Artist USING(ArtistId)\nGROUP BY chinook.Artist.ArtistId\nORDER BY total_sales DESC\nLIMIT 5",
+      "gold_sql": "SELECT ar.Name AS artist, ROUND(SUM(il.UnitPrice * il.Quantity), 2) AS revenue FROM chinook.InvoiceLine il JOIN chinook.Track t ON il.TrackId = t.TrackId JOIN chinook.Album al ON t.AlbumId = al.AlbumId JOIN chinook.Artist ar ON al.ArtistId = ar.ArtistId GROUP BY ar.Name ORDER BY revenue DESC LIMIT 5",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.67 (intersection=4, union=6)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "artist",
+            "revenue"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 9,
+        "judge_completeness": 10,
+        "judge_clarity": 7,
+        "judge_insight": 5,
+        "judge_overall": 8,
+        "judge_notes": "数据与参考答案基本一致，但浮点显示不精确；回答简洁但缺乏结构化和额外解读。"
+      }
+    },
+    {
+      "id": "c1_cross_db_compare",
+      "difficulty": "challenging",
+      "question": "各州 Olist 订单量和 Chinook 发票数对比",
+      "expected_intent": "comparison",
+      "agent_sql": "SELECT state,\n       SUM(olist_order_count) AS olist_order_count,\n       SUM(chinook_invoice_count) AS chinook_invoice_count\nFROM (\n    SELECT c.customer_state AS state,\n           COUNT(DISTINCT o.order_id) AS olist_order_count,\n           0 AS chinook_invoice_count\n    FROM olist_orders_dataset o\n    JOIN olist_customers_dataset c ON o.customer_id = c.customer_id\n    WHERE c.customer_state IS NOT NULL\n    GROUP BY c.customer_state\n\n    UNION ALL\n\n    SELECT i.BillingState AS state,\n           0 AS olist_order_count,\n           COUNT(*) AS chinook_invoice_count\n    FROM chinook.Invoice i\n    WHERE i.BillingState IS NOT NULL\n    GROUP BY i.BillingState\n) t\nGROUP BY state",
+      "gold_sql": "SELECT c.customer_state, COUNT(*) AS olist_orders, (SELECT COUNT(*) FROM chinook.Invoice) AS chinook_invoices FROM olist_orders_dataset o JOIN olist_customers_dataset c ON o.customer_id = c.customer_id GROUP BY c.customer_state ORDER BY olist_orders DESC",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=48)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": true,
+        "intent_predicted": "comparison",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "customer_state"
+          ],
+          "row_recall": 0.0,
+          "cell_accuracy": 0.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 0,
+        "judge_completeness": 0,
+        "judge_clarity": 0,
+        "judge_insight": 0,
+        "judge_overall": 0,
+        "judge_notes": ""
+      }
+    },
+    {
+      "id": "c2_furniture_bad_reviews",
+      "difficulty": "challenging",
+      "question": "Olist 各品类的差评率排名，家具类目和其他品类相比如何？",
+      "expected_intent": "comparison",
+      "agent_sql": "SELECT pc.product_name_english AS category_name,\n       ROUND(SUM(CASE WHEN r.review_score <= 2 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS bad_review_rate\nFROM olist_order_items_dataset oi\nJOIN olist_products_dataset p ON oi.product_id = p.product_id\nJOIN product_category_name_translation pc ON p.product_category_name = pc.product_category_name\nJOIN olist_order_reviews_dataset r ON oi.order_id = r.order_id\nGROUP BY pc.product_name_english\nORDER BY bad_review_rate DESC",
+      "gold_sql": "SELECT t.product_name_english AS category, SUM(CASE WHEN r.review_score <= 2 THEN 1 ELSE 0 END) AS bad, COUNT(*) AS total, ROUND(SUM(CASE WHEN r.review_score <= 2 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS bad_pct FROM olist_order_reviews_dataset r JOIN olist_order_items_dataset oi ON r.order_id = oi.order_id JOIN olist_products_dataset p ON oi.product_id = p.product_id JOIN product_category_name_translation t ON p.product_category_name = t.product_category_name GROUP BY t.product_name_english ORDER BY bad_pct DESC",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=40)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "bad",
+            "category",
+            "total"
+          ],
+          "row_recall": 1.0,
+          "cell_accuracy": 0.5,
+          "cell_diff_count": 20
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 3,
+        "judge_clarity": 7,
+        "judge_insight": 2,
+        "judge_overall": 5,
+        "judge_notes": "数据准确但与参考答案一致，仅展示了前5个品类，未完整回答排名问题，也未对家具类目进行对比分析，缺乏洞察。"
+      }
+    },
+    {
+      "id": "c3_chinook_revenue_efficiency",
+      "difficulty": "challenging",
+      "question": "Chinook 各流派的收入和曲目数，哪个流派收入效率（收入/曲目数）最高？",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT g.Name AS genre_name,\n       SUM(COALESCE(il.UnitPrice * il.Quantity, 0)) * 1.0 / COUNT(DISTINCT t.TrackId) AS revenue_per_track\nFROM chinook.Genre g\nJOIN chinook.Track t ON g.GenreId = t.GenreId\nLEFT JOIN chinook.InvoiceLine il ON t.TrackId = il.TrackId\nGROUP BY g.Name\nORDER BY revenue_per_track DESC\nLIMIT 1",
+      "gold_sql": "SELECT g.Name AS genre, COUNT(DISTINCT t.TrackId) AS tracks, ROUND(SUM(il.UnitPrice * il.Quantity), 2) AS revenue, ROUND(SUM(il.UnitPrice * il.Quantity) / COUNT(DISTINCT t.TrackId), 2) AS revenue_per_track FROM chinook.Genre g JOIN chinook.Track t ON g.GenreId = t.GenreId JOIN chinook.InvoiceLine il ON t.TrackId = il.TrackId GROUP BY g.Name ORDER BY revenue_per_track DESC LIMIT 5",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=6)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "comparison",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "genre",
+            "revenue",
+            "track"
+          ],
+          "row_recall": 0.0,
+          "cell_accuracy": 0.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 0,
+        "judge_completeness": 0,
+        "judge_clarity": 0,
+        "judge_insight": 0,
+        "judge_overall": 0,
+        "judge_notes": ""
+      }
+    },
+    {
+      "id": "c4_olist_monthly_trend",
+      "difficulty": "challenging",
+      "question": "Olist 月度订单量趋势分析，哪个月最高哪个月最低？",
+      "expected_intent": "trend_analysis",
+      "agent_sql": "SELECT month, order_count\nFROM (\n    SELECT strftime('%Y-%m', order_purchase_timestamp) AS month,\n           COUNT(*) AS order_count\n    FROM olist_orders_dataset\n    GROUP BY strftime('%Y-%m', order_purchase_timestamp)\n) AS monthly\nWHERE order_count = (\n    SELECT MAX(order_count)\n    FROM (\n        SELECT COUNT(*) AS order_count\n        FROM olist_orders_dataset\n        GROUP BY strftime('%Y-%m', order_purchase_timestamp)\n    ) AS m\n)\nOR order_count = (\n    SELECT MIN(order_count)\n    FROM (\n        SELECT COUNT(*) AS order_count\n        FROM olist_orders_dataset\n        GROUP BY strftime('%Y-%m', order_purchase_timestamp)\n    ) AS m\n)\nORDER BY order_count DESC, month;",
+      "gold_sql": "SELECT strftime('%Y-%m', order_purchase_timestamp) AS month, COUNT(*) AS orders FROM olist_orders_dataset GROUP BY month ORDER BY month",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Partial match: agent has 2/18 rows",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "comparison",
+        "field_eval": {
+          "column_all_hit": true,
+          "missing_columns": [],
+          "row_recall": 0.1111,
+          "cell_accuracy": 1.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 9,
+        "judge_completeness": 4,
+        "judge_clarity": 5,
+        "judge_insight": 2,
+        "judge_overall": 5,
+        "judge_notes": "SQL逻辑正确，但回答仅给出最高最低值，未提供趋势分析，且输出格式缺少解释。"
+      }
+    },
+    {
+      "id": "p1_feb_vs_jan_rootcause",
+      "difficulty": "compound",
+      "question": "为什么 Olist 2月订单量比1月少这么多？分析原因",
+      "expected_intent": "root_cause",
+      "agent_sql": "SELECT strftime('%Y-%m', order_purchase_timestamp) AS month,\n       COUNT(*) AS order_count,\n       ROUND(COUNT(*) * 1.0 / MAX(strftime('%d', date(strftime('%Y-%m-01', order_purchase_timestamp), '+1 month', '-1 day'))), 1) AS avg_daily_orders\nFROM olist_orders_dataset\nWHERE strftime('%m', order_purchase_timestamp) IN ('01','02')\nGROUP BY strftime('%Y-%m', order_purchase_timestamp)\nORDER BY month",
+      "gold_sql": "SELECT strftime('%Y-%m', order_purchase_timestamp) AS month, COUNT(*) AS orders FROM olist_orders_dataset WHERE strftime('%Y-%m', order_purchase_timestamp) IN ('2025-01','2025-02','2026-01','2026-02') GROUP BY month ORDER BY month",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=8)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": true,
+          "missing_columns": [],
+          "row_recall": 0.0,
+          "cell_accuracy": 0.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 10,
+        "judge_completeness": 3,
+        "judge_clarity": 6,
+        "judge_insight": 2,
+        "judge_overall": 4,
+        "judge_notes": "数据与参考答案一致，且计算了日均订单；但未解释2月订单量下降的原因，仅罗列数值，缺乏深度分析。"
+      }
+    },
+    {
+      "id": "p2_seller_delay_rate",
+      "difficulty": "compound",
+      "question": "Olist 哪个卖家的延迟发货率最高？列出 TOP 5",
+      "expected_intent": "data_query",
+      "agent_sql": "SELECT oi.seller_id,\n       ROUND(SUM(CASE WHEN date(o.order_delivered_customer_date) > date(o.order_estimated_delivery_date) THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS delayed_shipment_rate\nFROM olist_order_items_dataset oi\nJOIN olist_orders_dataset o ON oi.order_id = o.order_id\nWHERE o.order_delivered_customer_date IS NOT NULL\nGROUP BY oi.seller_id\nORDER BY delayed_shipment_rate DESC\nLIMIT 5",
+      "gold_sql": "SELECT s.seller_id, s.seller_state, SUM(CASE WHEN o.order_delivered_carrier_date > oi.shipping_limit_date THEN 1 ELSE 0 END) AS late, COUNT(*) AS total, ROUND(SUM(CASE WHEN o.order_delivered_carrier_date > oi.shipping_limit_date THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS late_pct FROM olist_order_items_dataset oi JOIN olist_sellers_dataset s ON oi.seller_id = s.seller_id JOIN olist_orders_dataset o ON oi.order_id = o.order_id WHERE o.order_delivered_carrier_date IS NOT NULL GROUP BY s.seller_id, s.seller_state ORDER BY late_pct DESC LIMIT 5",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=10)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "comparison",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "late",
+            "seller_state",
+            "total"
+          ],
+          "row_recall": 0.2,
+          "cell_accuracy": 0.5,
+          "cell_diff_count": 1
+        },
+        "judge_accuracy": 1,
+        "judge_completeness": 3,
+        "judge_clarity": 6,
+        "judge_insight": 1,
+        "judge_overall": 2,
+        "judge_notes": "SQL 因连接 order_items 与 orders 导致重复计数，误将 item 数当作订单数，结果与参考答案严重不符；仅给出列表无深度分析。"
+      }
+    },
+    {
+      "id": "p3_rock_revenue_analysis",
+      "difficulty": "compound",
+      "question": "Chinook Rock 流派为什么收入最高？分析曲目数和单价的关系",
+      "expected_intent": "root_cause",
+      "agent_sql": "SELECT g.Name AS genre_name,\n       t.track_count,\n       t.avg_unit_price,\n       r.revenue\nFROM chinook.Genre g\nJOIN (\n    SELECT GenreId,\n           COUNT(*) AS track_count,\n           ROUND(AVG(UnitPrice), 2) AS avg_unit_price\n    FROM chinook.Track\n    GROUP BY GenreId\n) t ON g.GenreId = t.GenreId\nJOIN (\n    SELECT tr.GenreId,\n           ROUND(SUM(il.UnitPrice * il.Quantity), 2) AS revenue\n    FROM chinook.InvoiceLine il\n    JOIN chinook.Track tr ON il.TrackId = tr.TrackId\n    GROUP BY tr.GenreId\n) r ON g.GenreId = r.GenreId\nORDER BY r.revenue DESC",
+      "gold_sql": "SELECT g.Name AS genre, COUNT(DISTINCT t.TrackId) AS tracks, ROUND(AVG(il.UnitPrice), 2) AS avg_price, ROUND(SUM(il.UnitPrice * il.Quantity), 2) AS revenue FROM chinook.Genre g JOIN chinook.Track t ON g.GenreId = t.GenreId JOIN chinook.InvoiceLine il ON t.TrackId = il.TrackId GROUP BY g.Name ORDER BY revenue DESC LIMIT 5",
+      "metrics": {
+        "execution_accuracy": false,
+        "ex_detail": "Jaccard=0.00 (intersection=0, union=29)",
+        "schema_linking": true,
+        "invalid_tables": [],
+        "intent_match": false,
+        "intent_predicted": "data_query",
+        "field_eval": {
+          "column_all_hit": false,
+          "missing_columns": [
+            "genre",
+            "price"
+          ],
+          "row_recall": 0.0,
+          "cell_accuracy": 0.0,
+          "cell_diff_count": 0
+        },
+        "judge_accuracy": 4,
+        "judge_completeness": 2,
+        "judge_clarity": 6,
+        "judge_insight": 2,
+        "judge_overall": 4,
+        "judge_notes": "track_count为全部曲目数而非实际参与销售的曲目数，与参考答案不一致；收入数据正确，但未回答‘为什么收入最高’及曲目数与单价的关系，缺乏分析解读。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "_comment": "Schema 三级检索注册表：新增数据集只需在此追加数据域和表定义，无需改代码。aliases 是数据域的检索语料，columns/joins 参与表级检索与 Prompt 组装。",
+  "domains": {
+    "olist_order": {
+      "aliases": ["订单", "下单", "销量", "订单量", "趋势", "月度", "配送", "发货"],
+      "tables": ["olist_orders_dataset", "olist_customers_dataset", "olist_order_items_dataset"],
+      "description": "Olist 电商订单域：订单生命周期、客户归属、订单明细与时间趋势。"
+    },
+    "olist_payment": {
+      "aliases": ["销售额", "支付", "支付方式", "客单价", "成交额", "gmv", "收入"],
+      "tables": ["olist_order_payments_dataset", "olist_orders_dataset", "olist_customers_dataset"],
+      "description": "Olist 交易支付域：支付金额、支付方式、客单价及地域交易表现。"
+    },
+    "olist_product": {
+      "aliases": ["品类", "商品", "产品", "卖家", "商家", "家具", "美妆"],
+      "tables": ["olist_order_items_dataset", "olist_products_dataset", "olist_sellers_dataset", "product_category_name_translation"],
+      "description": "Olist 商品与卖家域：商品品类、卖家、价格、运费与发货表现。"
+    },
+    "olist_review": {
+      "aliases": ["评价", "评分", "差评", "好评", "满意度", "投诉"],
+      "tables": ["olist_order_reviews_dataset", "olist_orders_dataset", "olist_order_items_dataset", "olist_products_dataset"],
+      "description": "Olist 服务质量域：订单评价、差评率及其按品类/卖家的归因。"
+    },
+    "chinook_sales": {
+      "aliases": ["音乐", "曲目", "流派", "艺术家", "歌手", "专辑", "发票", "数字媒体"],
+      "tables": ["chinook.Invoice", "chinook.InvoiceLine", "chinook.Track", "chinook.Genre", "chinook.Album", "chinook.Artist"],
+      "description": "Chinook 数字媒体销售域：发票、曲目销量、流派/艺术家收入。"
+    }
+  },
+  "tables": {
+    "olist_orders_dataset": {"columns": ["order_id", "customer_id", "order_status", "order_purchase_timestamp", "order_approved_at", "order_delivered_carrier_date", "order_delivered_customer_date", "order_estimated_delivery_date"], "joins": ["JOIN olist_customers_dataset USING(customer_id)", "JOIN olist_order_items_dataset USING(order_id)", "JOIN olist_order_payments_dataset USING(order_id)", "JOIN olist_order_reviews_dataset USING(order_id)"]},
+    "olist_customers_dataset": {"columns": ["customer_id", "customer_unique_id", "customer_city", "customer_state"], "joins": ["JOIN olist_orders_dataset USING(customer_id)"]},
+    "olist_order_items_dataset": {"columns": ["order_id", "order_item_id", "product_id", "seller_id", "price", "freight_value", "shipping_limit_date"], "joins": ["JOIN olist_orders_dataset USING(order_id)", "JOIN olist_products_dataset USING(product_id)", "JOIN olist_sellers_dataset USING(seller_id)"]},
+    "olist_order_payments_dataset": {"columns": ["order_id", "payment_type", "payment_installments", "payment_value"], "joins": ["JOIN olist_orders_dataset USING(order_id)"]},
+    "olist_order_reviews_dataset": {"columns": ["review_id", "order_id", "review_score", "review_creation_date"], "joins": ["JOIN olist_orders_dataset USING(order_id)"]},
+    "olist_products_dataset": {"columns": ["product_id", "product_category_name", "product_weight_g"], "joins": ["JOIN olist_order_items_dataset USING(product_id)", "JOIN product_category_name_translation USING(product_category_name)"]},
+    "olist_sellers_dataset": {"columns": ["seller_id", "seller_city", "seller_state"], "joins": ["JOIN olist_order_items_dataset USING(seller_id)"]},
+    "product_category_name_translation": {"columns": ["product_category_name", "product_name_english"], "joins": ["JOIN olist_products_dataset USING(product_category_name)"]},
+    "chinook.Invoice": {"columns": ["InvoiceId", "CustomerId", "InvoiceDate", "BillingCity", "BillingState", "BillingCountry", "Total"], "joins": ["JOIN chinook.InvoiceLine USING(InvoiceId)"]},
+    "chinook.InvoiceLine": {"columns": ["InvoiceLineId", "InvoiceId", "TrackId", "UnitPrice", "Quantity"], "joins": ["JOIN chinook.Invoice USING(InvoiceId)", "JOIN chinook.Track USING(TrackId)"]},
+    "chinook.Track": {"columns": ["TrackId", "Name", "AlbumId", "GenreId", "UnitPrice", "Milliseconds"], "joins": ["JOIN chinook.InvoiceLine USING(TrackId)", "JOIN chinook.Genre USING(GenreId)", "JOIN chinook.Album USING(AlbumId)"]},
+    "chinook.Genre": {"columns": ["GenreId", "Name"], "joins": ["JOIN chinook.Track USING(GenreId)"]},
+    "chinook.Album": {"columns": ["AlbumId", "Title", "ArtistId"], "joins": ["JOIN chinook.Track USING(AlbumId)", "JOIN chinook.Artist USING(ArtistId)"]},
+    "chinook.Artist": {"columns": ["ArtistId", "Name"], "joins": ["JOIN chinook.Album USING(ArtistId)"]}
+  }
+}

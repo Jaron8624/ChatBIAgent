@@ -1,0 +1,1087 @@
+{
+  "suite": "spider_dev_all_20_dbs",
+  "created_at": "2026-08-28T23:17:23",
+  "scope": "Spider dev 集 20 个数据库，每库采样 5 题（共 99 题）；真实 Spider SQLite 数据库；LLM 直出 SQL（无语义层）",
+  "data_source": "HuggingFace HAL-9001/spider-databases (spider_data.zip, 196MB)",
+  "metric_policy": "EX 严格判等（结果集完全一致才计正确）；Jaccard>=0.8 记为 partial_match 参考指标，不计入 EX",
+  "summary": {
+    "execution_accuracy": "80/99 (80.8%)",
+    "partial_match_count": 4,
+    "databases_evaluated": 20,
+    "total_questions": 99
+  },
+  "per_database": {
+    "battle_death": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "car_1": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "concert_singer": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "course_teach": {
+      "ex": "3/5",
+      "accuracy": "60.0%"
+    },
+    "cre_Doc_Template_Mgt": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "dog_kennels": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "employee_hire_evaluation": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "flight_2": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "museum_visit": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "network_1": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "orchestra": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "pets_1": {
+      "ex": "4/5",
+      "accuracy": "80.0%"
+    },
+    "poker_player": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "real_estate_properties": {
+      "ex": "3/4",
+      "accuracy": "75.0%"
+    },
+    "singer": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "student_transcripts_tracking": {
+      "ex": "2/5",
+      "accuracy": "40.0%"
+    },
+    "tvshow": {
+      "ex": "3/5",
+      "accuracy": "60.0%"
+    },
+    "voter_1": {
+      "ex": "5/5",
+      "accuracy": "100.0%"
+    },
+    "world_1": {
+      "ex": "3/5",
+      "accuracy": "60.0%"
+    },
+    "wta_1": {
+      "ex": "3/5",
+      "accuracy": "60.0%"
+    }
+  },
+  "results": [
+    {
+      "db_id": "battle_death",
+      "question": "What is maximum and minimum death toll caused each time?",
+      "gold_sql": "SELECT max(killed) ,  min(killed) FROM death",
+      "agent_sql": "SELECT \n  ship.lost_in_battle,\n  battle.name,\n  MAX(death.killed) as max_death_toll,\n  MIN(death.killed) as min_death_toll\nFROM death\nJOIN ship ON death.caused_by_ship_id = ship.id\nJOIN battle ON ship.lost_in_battle = battle.id\nGROUP BY ship.lost_in_battle, battle.name\nORDER BY ship.lost_in_battle",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=6)"
+    },
+    {
+      "db_id": "battle_death",
+      "question": "How many ships ended up being 'Captured'?",
+      "gold_sql": "SELECT count(*) FROM ship WHERE disposition_of_ship  =  'Captured'",
+      "agent_sql": "SELECT COUNT(*) FROM ship WHERE disposition_of_ship = 'Captured'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "battle_death",
+      "question": "How many different results are there for the battles?",
+      "gold_sql": "SELECT count(DISTINCT RESULT) FROM battle",
+      "agent_sql": "SELECT COUNT(DISTINCT result) FROM battle",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "battle_death",
+      "question": "What is the average number of injuries caused each time?",
+      "gold_sql": "SELECT avg(injured) FROM death",
+      "agent_sql": "SELECT AVG(injured) FROM death",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "battle_death",
+      "question": "What are the notes of the death events which has substring 'East'?",
+      "gold_sql": "SELECT note FROM death WHERE note LIKE '%East%'",
+      "agent_sql": "SELECT note FROM death WHERE note LIKE '%East%'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "car_1",
+      "question": "How many car models are produced in the usa?",
+      "gold_sql": "SELECT count(*) FROM MODEL_LIST AS T1 JOIN CAR_MAKERS AS T2 ON T1.Maker  =  T2.Id JOIN COUNTRIES AS T3 ON T2.Country  =  T3.CountryId WHERE T3.CountryName  =  'usa';",
+      "agent_sql": "SELECT COUNT(DISTINCT ml.ModelId)\nFROM model_list ml\nJOIN car_makers cm ON ml.Maker = cm.Id\nJOIN countries c ON cm.Country = c.CountryId\nWHERE c.CountryName = 'usa'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "car_1",
+      "question": "What are the different models for the cards produced after 1980?",
+      "gold_sql": "SELECT DISTINCT T1.model FROM MODEL_LIST AS T1 JOIN CAR_NAMES AS T2 ON T1.model  =  T2.model JOIN CARS_DATA AS T3 ON T2.MakeId  =  T3.id WHERE T3.year  >  1980;",
+      "agent_sql": "SELECT DISTINCT ml.Model\nFROM model_list ml\nJOIN car_names cn ON ml.Model = cn.Model\nJOIN cars_data cd ON cn.MakeId = cd.Id\nWHERE cd.Year > 1980",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "car_1",
+      "question": "What is the name of the different car makers who produced a car in 1970?",
+      "gold_sql": "SELECT DISTINCT T1.Maker FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id  =  T2.Maker JOIN CAR_NAMES AS T3 ON T2.model  =  T3.model JOIN CARS_DATA AS T4 ON T3.MakeId  =  T4.id WHERE T4.year  =  '1970';",
+      "agent_sql": "SELECT DISTINCT cm.Maker\nFROM car_makers cm\nJOIN model_list ml ON cm.Id = ml.Maker\nJOIN car_names cn ON ml.Model = cn.Model\nJOIN cars_data cd ON cn.MakeId = cd.Id\nWHERE cd.Year = 1970",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "car_1",
+      "question": "What are the name of the countries where there is not a single car maker?",
+      "gold_sql": "SELECT CountryName FROM countries EXCEPT SELECT T1.CountryName FROM countries AS T1 JOIN CAR_MAKERS AS T2 ON T1.countryId  =  T2.Country;",
+      "agent_sql": "SELECT c.CountryName\nFROM countries c\nWHERE c.CountryId NOT IN (\n  SELECT DISTINCT cm.Country\n  FROM car_makers cm\n  WHERE cm.Country IS NOT NULL\n)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "car_1",
+      "question": "What is the horsepower of the car with the greatest accelerate?",
+      "gold_sql": "SELECT T1.horsepower FROM CARS_DATA AS T1 ORDER BY T1.accelerate DESC LIMIT 1;",
+      "agent_sql": "SELECT Horsepower FROM cars_data WHERE Accelerate = (SELECT MAX(Accelerate) FROM cars_data)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "concert_singer",
+      "question": "What is the average, minimum, and maximum age for all French singers?",
+      "gold_sql": "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",
+      "agent_sql": "SELECT AVG(Age) as average_age, MIN(Age) as minimum_age, MAX(Age) as maximum_age FROM singer WHERE Country = 'France'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "concert_singer",
+      "question": "List all singer names in concerts in year 2014.",
+      "gold_sql": "SELECT T2.name FROM singer_in_concert AS T1 JOIN singer AS T2 ON T1.singer_id  =  T2.singer_id JOIN concert AS T3 ON T1.concert_id  =  T3.concert_id WHERE T3.year  =  2014",
+      "agent_sql": "SELECT DISTINCT s.Name\nFROM singer s\nJOIN singer_in_concert sic ON s.Singer_ID = sic.Singer_ID\nJOIN concert c ON sic.concert_ID = c.concert_ID\nWHERE c.Year = '2014'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "concert_singer",
+      "question": "What is the year that had the most concerts?",
+      "gold_sql": "SELECT YEAR FROM concert GROUP BY YEAR ORDER BY count(*) DESC LIMIT 1",
+      "agent_sql": "SELECT Year, COUNT(*) as concert_count\nFROM concert\nGROUP BY Year\nORDER BY concert_count DESC\nLIMIT 1",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=2)"
+    },
+    {
+      "db_id": "concert_singer",
+      "question": "Show name, country, age for all singers ordered by age from the oldest to the youngest.",
+      "gold_sql": "SELECT name ,  country ,  age FROM singer ORDER BY age DESC",
+      "agent_sql": "SELECT Name, Country, Age FROM singer ORDER BY Age DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "concert_singer",
+      "question": "What is the total number of singers?",
+      "gold_sql": "SELECT count(*) FROM singer",
+      "agent_sql": "SELECT COUNT(*) FROM singer",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "course_teach",
+      "question": "List the names of teachers in ascending order of age.",
+      "gold_sql": "SELECT Name FROM teacher ORDER BY Age ASC",
+      "agent_sql": "SELECT Name FROM teacher ORDER BY Age ASC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "course_teach",
+      "question": "List the name of teachers whose hometown is not `` Little Lever Urban District '' .",
+      "gold_sql": "select name from teacher where hometown != \"little lever urban district\"",
+      "agent_sql": "SELECT Name FROM teacher WHERE Hometown != 'Little Lever Urban District'",
+      "ex_correct": false,
+      "partial_match": true,
+      "jaccard": 0.8571,
+      "ex_detail": "jaccard=0.86 (inter=6, union=7)"
+    },
+    {
+      "db_id": "course_teach",
+      "question": "What are the names of the teachers whose hometown is not `` Little Lever Urban District '' ?",
+      "gold_sql": "select name from teacher where hometown != \"little lever urban district\"",
+      "agent_sql": "SELECT Name FROM teacher WHERE Hometown != 'Little Lever Urban District'",
+      "ex_correct": false,
+      "partial_match": true,
+      "jaccard": 0.8571,
+      "ex_detail": "jaccard=0.86 (inter=6, union=7)"
+    },
+    {
+      "db_id": "course_teach",
+      "question": "Show the hometowns shared by at least two teachers.",
+      "gold_sql": "SELECT Hometown FROM teacher GROUP BY Hometown HAVING COUNT(*)  >=  2",
+      "agent_sql": "SELECT Hometown\nFROM teacher\nGROUP BY Hometown\nHAVING COUNT(*) >= 2",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "course_teach",
+      "question": "What is the name of each teacher and what course they teach?",
+      "gold_sql": "SELECT T3.Name ,  T2.Course FROM course_arrange AS T1 JOIN course AS T2 ON T1.Course_ID  =  T2.Course_ID JOIN teacher AS T3 ON T1.Teacher_ID  =  T3.Teacher_ID",
+      "agent_sql": "SELECT t.Name, c.Course\nFROM teacher t\nJOIN course_arrange ca ON t.Teacher_ID = ca.Teacher_ID\nJOIN course c ON ca.Course_ID = c.Course_ID",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "cre_Doc_Template_Mgt",
+      "question": "What are the ids, names, and descriptions for all documents?",
+      "gold_sql": "SELECT document_id ,  document_name ,  document_description FROM Documents",
+      "agent_sql": "SELECT Document_ID, Document_Name, Document_Description FROM Documents",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "cre_Doc_Template_Mgt",
+      "question": "Return the different document ids along with the number of paragraphs corresponding to each, ordered by id.",
+      "gold_sql": "SELECT document_id ,  count(*) FROM Paragraphs GROUP BY document_id ORDER BY document_id",
+      "agent_sql": "SELECT d.Document_ID, COUNT(p.Paragraph_ID) as paragraph_count\nFROM Documents d\nLEFT JOIN Paragraphs p ON d.Document_ID = p.Document_ID\nGROUP BY d.Document_ID\nORDER BY d.Document_ID",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.6667,
+      "ex_detail": "jaccard=0.67 (inter=10, union=15)"
+    },
+    {
+      "db_id": "cre_Doc_Template_Mgt",
+      "question": "What are the different template type codes?",
+      "gold_sql": "SELECT DISTINCT template_type_code FROM Templates",
+      "agent_sql": "SELECT DISTINCT Template_Type_Code FROM Ref_Template_Types",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "cre_Doc_Template_Mgt",
+      "question": "What are the ids of documents that contain the paragraph text 'Brazil' and 'Ireland'?",
+      "gold_sql": "SELECT document_id FROM Paragraphs WHERE paragraph_text  =  'Brazil' INTERSECT SELECT document_id FROM Paragraphs WHERE paragraph_text  =  'Ireland'",
+      "agent_sql": "SELECT DISTINCT d.Document_ID\nFROM Documents d\nINNER JOIN Paragraphs p ON d.Document_ID = p.Document_ID\nWHERE p.Paragraph_Text IN ('Brazil', 'Ireland')\nGROUP BY d.Document_ID\nHAVING COUNT(DISTINCT p.Paragraph_Text) = 2",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "cre_Doc_Template_Mgt",
+      "question": "What are the paragraph texts for the document with the name 'Customer reviews'?",
+      "gold_sql": "SELECT T1.paragraph_text FROM Paragraphs AS T1 JOIN Documents AS T2 ON T1.document_id  =  T2.document_id WHERE T2.document_name  =  \"Customer reviews\"",
+      "agent_sql": "SELECT p.Paragraph_Text\nFROM Paragraphs p\nJOIN Documents d ON p.Document_ID = d.Document_ID\nWHERE d.Document_Name = 'Customer reviews'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "dog_kennels",
+      "question": "Find the role, street, city and state of the professionals living in a city that contains the substring 'West'.",
+      "gold_sql": "SELECT role_code ,  street ,  city ,  state FROM professionals WHERE city LIKE '%West%'",
+      "agent_sql": "SELECT role_code, street, city, state FROM Professionals WHERE city LIKE '%West%'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "dog_kennels",
+      "question": "List the date of each treatment, together with the first name of the professional who operated it.",
+      "gold_sql": "SELECT T1.date_of_treatment ,  T2.first_name FROM Treatments AS T1 JOIN Professionals AS T2 ON T1.professional_id  =  T2.professional_id",
+      "agent_sql": "SELECT t.date_of_treatment, p.first_name\nFROM Treatments t\nJOIN Professionals p ON t.professional_id = p.professional_id",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "dog_kennels",
+      "question": "Count the number of dogs of an age below the average.",
+      "gold_sql": "SELECT count(*) FROM Dogs WHERE age  <  ( SELECT avg(age) FROM Dogs )",
+      "agent_sql": "SELECT COUNT(*) FROM Dogs WHERE CAST(age AS FLOAT) < (SELECT AVG(CAST(age AS FLOAT)) FROM Dogs WHERE age IS NOT NULL)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "dog_kennels",
+      "question": "What is the charge amount of the most expensive charge type?",
+      "gold_sql": "SELECT max(charge_amount) FROM Charges",
+      "agent_sql": "SELECT MAX(charge_amount) FROM Charges",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "dog_kennels",
+      "question": "What are each owner's first name and their dogs's name?",
+      "gold_sql": "SELECT T1.first_name ,  T2.name FROM Owners AS T1 JOIN Dogs AS T2 ON T1.owner_id  =  T2.owner_id",
+      "agent_sql": "SELECT o.first_name, d.name\nFROM Owners o\nLEFT JOIN Dogs d ON o.owner_id = d.owner_id\nORDER BY o.first_name, d.name",
+      "ex_correct": false,
+      "partial_match": true,
+      "jaccard": 0.8333,
+      "ex_detail": "jaccard=0.83 (inter=15, union=18)"
+    },
+    {
+      "db_id": "employee_hire_evaluation",
+      "question": "How many employees are there?",
+      "gold_sql": "SELECT count(*) FROM employee",
+      "agent_sql": "SELECT COUNT(*) FROM employee",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "employee_hire_evaluation",
+      "question": "Find the manager name and district of the shop whose number of products is the largest.",
+      "gold_sql": "SELECT manager_name ,  district FROM shop ORDER BY number_products DESC LIMIT 1",
+      "agent_sql": "SELECT Manager_name, District FROM shop WHERE Number_products = (SELECT MAX(Number_products) FROM shop)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "employee_hire_evaluation",
+      "question": "Which shops run with no employees? Find the shop names",
+      "gold_sql": "SELECT name FROM shop WHERE shop_id NOT IN (SELECT shop_id FROM hiring)",
+      "agent_sql": "SELECT s.Name\nFROM shop s\nLEFT JOIN hiring h ON s.Shop_ID = h.Shop_ID\nWHERE h.Employee_ID IS NULL",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "employee_hire_evaluation",
+      "question": "Which employee received the biggest bonus? Give me the employee name.",
+      "gold_sql": "SELECT t1.name FROM employee AS t1 JOIN evaluation AS t2 ON t1.Employee_ID  =  t2.Employee_ID ORDER BY t2.bonus DESC LIMIT 1",
+      "agent_sql": "SELECT e.Name\nFROM employee e\nJOIN evaluation ev ON e.Employee_ID = ev.Employee_ID\nWHERE ev.Bonus = (SELECT MAX(Bonus) FROM evaluation)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "employee_hire_evaluation",
+      "question": "Which shops' number products is above the average? Give me the shop names.",
+      "gold_sql": "SELECT name FROM shop WHERE number_products  >  (SELECT avg(number_products) FROM shop)",
+      "agent_sql": "SELECT name FROM shop WHERE number_products > (SELECT AVG(number_products) FROM shop)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "flight_2",
+      "question": "Give the city and country for the Alton airport.",
+      "gold_sql": "SELECT City ,  Country FROM AIRPORTS WHERE AirportName  =  \"Alton\"",
+      "agent_sql": "SELECT City, Country FROM airports WHERE AirportCode = 'ALN'",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=1)"
+    },
+    {
+      "db_id": "flight_2",
+      "question": "Count the number of flights into ATO.",
+      "gold_sql": "SELECT count(*) FROM FLIGHTS WHERE DestAirport  =  \"ATO\"",
+      "agent_sql": "SELECT COUNT(*) FROM flights WHERE DestAirport = 'ATO'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "flight_2",
+      "question": "Which city has the most frequent destination airport?",
+      "gold_sql": "SELECT T1.City FROM AIRPORTS AS T1 JOIN FLIGHTS AS T2 ON T1.AirportCode  =  T2.DestAirport GROUP BY T1.City ORDER BY count(*) DESC LIMIT 1",
+      "agent_sql": "SELECT a.City\nFROM airports a\nWHERE a.AirportCode = (\n  SELECT DestAirport\n  FROM flights\n  GROUP BY DestAirport\n  ORDER BY COUNT(*) DESC\n  LIMIT 1\n)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "flight_2",
+      "question": "Return the number of flights.",
+      "gold_sql": "SELECT count(*) FROM FLIGHTS",
+      "agent_sql": "SELECT COUNT(*) FROM flights",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "flight_2",
+      "question": "Return the number of  airports.",
+      "gold_sql": "SELECT count(*) FROM AIRPORTS",
+      "agent_sql": "SELECT COUNT(*) FROM airports",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "museum_visit",
+      "question": "Find the name and age of the visitor who bought the most tickets at once.",
+      "gold_sql": "SELECT t1.name ,  t1.age FROM visitor AS t1 JOIN visit AS t2 ON t1.id  =  t2.visitor_id ORDER BY t2.num_of_ticket DESC LIMIT 1",
+      "agent_sql": "SELECT v.Name, v.Age\nFROM visitor v\nJOIN visit vi ON v.ID = vi.visitor_ID\nORDER BY vi.Num_of_Ticket DESC\nLIMIT 1",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "museum_visit",
+      "question": "Find the name and membership level of the visitors whose membership level is higher than 4, and sort by their age from old to young.",
+      "gold_sql": "SELECT name ,  Level_of_membership FROM visitor WHERE Level_of_membership  >  4 ORDER BY age DESC",
+      "agent_sql": "SELECT Name, Level_of_membership\nFROM visitor\nWHERE Level_of_membership > 4\nORDER BY Age DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "museum_visit",
+      "question": "What is the name of the museum that had no visitor yet?",
+      "gold_sql": "SELECT name FROM museum WHERE Museum_ID NOT IN (SELECT museum_id FROM visit)",
+      "agent_sql": "SELECT m.Name\nFROM museum m\nLEFT JOIN visit v ON m.Museum_ID = v.Museum_ID\nWHERE v.Museum_ID IS NULL",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "museum_visit",
+      "question": "What are the average and maximum number of tickets bought in all visits?",
+      "gold_sql": "SELECT avg(num_of_ticket) ,  max(num_of_ticket) FROM visit",
+      "agent_sql": "SELECT AVG(Num_of_Ticket) as average_tickets, MAX(Num_of_Ticket) as maximum_tickets FROM visit",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "museum_visit",
+      "question": "Find the average number of staff working for the museums that were open before 2009.",
+      "gold_sql": "SELECT avg(num_of_staff) FROM museum WHERE open_year  <  2009",
+      "agent_sql": "SELECT AVG(Num_of_Staff)\nFROM museum\nWHERE CAST(Open_Year AS INTEGER) < 2009",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "network_1",
+      "question": "Show name of all students who have some friends and also are liked by someone else.",
+      "gold_sql": "SELECT T2.name FROM Friend AS T1 JOIN Highschooler AS T2 ON T1.student_id  =  T2.id INTERSECT SELECT T2.name FROM Likes AS T1 JOIN Highschooler AS T2 ON T1.liked_id  =  T2.id",
+      "agent_sql": "SELECT DISTINCT h.name\nFROM Highschooler h\nWHERE h.ID IN (SELECT student_id FROM Friend)\nAND h.ID IN (SELECT liked_id FROM Likes)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "network_1",
+      "question": "Which grade has the most high schoolers?",
+      "gold_sql": "SELECT grade FROM Highschooler GROUP BY grade ORDER BY count(*) DESC LIMIT 1",
+      "agent_sql": "SELECT grade FROM Highschooler GROUP BY grade ORDER BY COUNT(*) DESC LIMIT 1",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "network_1",
+      "question": "Return the number of likes that the high schooler named Kyle has.",
+      "gold_sql": "SELECT count(*) FROM Likes AS T1 JOIN Highschooler AS T2 ON T1.student_id  =  T2.id WHERE T2.name  =  \"Kyle\"",
+      "agent_sql": "SELECT COUNT(*) FROM Likes WHERE student_id = (SELECT ID FROM Highschooler WHERE name = 'Kyle')",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "network_1",
+      "question": "Show the names and grades of each high schooler.",
+      "gold_sql": "SELECT name ,  grade FROM Highschooler",
+      "agent_sql": "SELECT name, grade FROM Highschooler",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "network_1",
+      "question": "Show the names of students who have at least 2 likes.",
+      "gold_sql": "SELECT T2.name FROM Likes AS T1 JOIN Highschooler AS T2 ON T1.student_id  =  T2.id GROUP BY T1.student_id HAVING count(*)  >=  2",
+      "agent_sql": "SELECT h.name\nFROM Highschooler h\nWHERE (SELECT COUNT(*) FROM Likes WHERE student_id = h.ID) >= 2",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "orchestra",
+      "question": "What are the major record formats of orchestras, sorted by their frequency?",
+      "gold_sql": "SELECT Major_Record_Format FROM orchestra GROUP BY Major_Record_Format ORDER BY COUNT(*) ASC",
+      "agent_sql": "SELECT Major_record_format, COUNT(*) as frequency\nFROM orchestra\nGROUP BY Major_record_format\nORDER BY frequency DESC",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=6)"
+    },
+    {
+      "db_id": "orchestra",
+      "question": "Show the record companies shared by orchestras founded before 2003 and after 2003.",
+      "gold_sql": "SELECT Record_Company FROM orchestra WHERE Year_of_Founded  <  2003 INTERSECT SELECT Record_Company FROM orchestra WHERE Year_of_Founded  >  2003",
+      "agent_sql": "SELECT DISTINCT o1.Record_Company\nFROM orchestra o1\nWHERE o1.Year_of_Founded < 2003\nAND o1.Record_Company IN (\n  SELECT DISTINCT o2.Record_Company\n  FROM orchestra o2\n  WHERE o2.Year_of_Founded > 2003\n)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "orchestra",
+      "question": "Return the record companies of orchestras, sorted descending by the years in which they were founded.",
+      "gold_sql": "SELECT Record_Company FROM orchestra ORDER BY Year_of_Founded DESC",
+      "agent_sql": "SELECT DISTINCT Record_Company\nFROM orchestra\nORDER BY Year_of_Founded DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "orchestra",
+      "question": "Please show the name of the conductor that has conducted orchestras founded after 2008.",
+      "gold_sql": "SELECT T1.Name FROM conductor AS T1 JOIN orchestra AS T2 ON T1.Conductor_ID  =  T2.Conductor_ID WHERE Year_of_Founded  >  2008",
+      "agent_sql": "SELECT DISTINCT c.Name\nFROM conductor c\nJOIN orchestra o ON c.Conductor_ID = o.Conductor_ID\nWHERE o.Year_of_Founded > 2008",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "orchestra",
+      "question": "Return the names of conductors that do not have the nationality \"USA\".",
+      "gold_sql": "SELECT Name FROM conductor WHERE Nationality != 'USA'",
+      "agent_sql": "SELECT Name FROM conductor WHERE Nationality != 'USA'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "pets_1",
+      "question": "For students who have pets , how many pets does each student have ? list their ids instead of names .",
+      "gold_sql": "select count(*) ,  t1.stuid from student as t1 join has_pet as t2 on t1.stuid  =  t2.stuid group by t1.stuid",
+      "agent_sql": "SELECT StuID, COUNT(PetID) as pet_count\nFROM Has_Pet\nGROUP BY StuID\nORDER BY StuID",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=4)"
+    },
+    {
+      "db_id": "pets_1",
+      "question": "Find the id of students who do not have a cat pet.",
+      "gold_sql": "SELECT stuid FROM student EXCEPT SELECT T1.stuid FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pettype  =  'cat'",
+      "agent_sql": "SELECT DISTINCT s.StuID\nFROM Student s\nWHERE s.StuID NOT IN (\n  SELECT DISTINCT hp.StuID\n  FROM Has_Pet hp\n  JOIN Pets p ON hp.PetID = p.PetID\n  WHERE p.PetType = 'cat'\n)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "pets_1",
+      "question": "Find the average age of students who do not have any pet .",
+      "gold_sql": "select avg(age) from student where stuid not in (select stuid from has_pet)",
+      "agent_sql": "SELECT AVG(Age) FROM Student WHERE StuID NOT IN (SELECT DISTINCT StuID FROM Has_Pet)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "pets_1",
+      "question": "What is the last name of the student who has a cat that is 3 years old?",
+      "gold_sql": "SELECT T1.lname FROM student AS T1 JOIN has_pet AS T2 ON T1.stuid  =  T2.stuid JOIN pets AS T3 ON T3.petid  =  T2.petid WHERE T3.pet_age  =  3 AND T3.pettype  =  'cat'",
+      "agent_sql": "SELECT Student.LName\nFROM Student\nJOIN Has_Pet ON Student.StuID = Has_Pet.StuID\nJOIN Pets ON Has_Pet.PetID = Pets.PetID\nWHERE Pets.PetType = 'cat' AND Pets.pet_age = 3",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "pets_1",
+      "question": "What type of pet is the youngest animal, and how much does it weigh?",
+      "gold_sql": "SELECT pettype ,  weight FROM pets ORDER BY pet_age LIMIT 1",
+      "agent_sql": "SELECT PetType, weight FROM Pets WHERE pet_age = (SELECT MIN(pet_age) FROM Pets)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "poker_player",
+      "question": "List the names of people that are not poker players.",
+      "gold_sql": "SELECT Name FROM people WHERE People_ID NOT IN (SELECT People_ID FROM poker_player)",
+      "agent_sql": "SELECT Name FROM people WHERE People_ID NOT IN (SELECT People_ID FROM poker_player)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "poker_player",
+      "question": "What are the names of poker players?",
+      "gold_sql": "SELECT T1.Name FROM people AS T1 JOIN poker_player AS T2 ON T1.People_ID  =  T2.People_ID",
+      "agent_sql": "SELECT p.Name\nFROM people p\nINNER JOIN poker_player pp ON p.People_ID = pp.People_ID",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "poker_player",
+      "question": "List the final tables made and the best finishes of poker players.",
+      "gold_sql": "SELECT Final_Table_Made ,  Best_Finish FROM poker_player",
+      "agent_sql": "SELECT Final_Table_Made, Best_Finish FROM poker_player",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "poker_player",
+      "question": "List the earnings of poker players in descending order.",
+      "gold_sql": "SELECT Earnings FROM poker_player ORDER BY Earnings DESC",
+      "agent_sql": "SELECT Earnings FROM poker_player ORDER BY Earnings DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "poker_player",
+      "question": "What are the names of poker players whose earnings is higher than 300000?",
+      "gold_sql": "SELECT T1.Name FROM people AS T1 JOIN poker_player AS T2 ON T1.People_ID  =  T2.People_ID WHERE T2.Earnings  >  300000",
+      "agent_sql": "SELECT p.Name\nFROM poker_player pp\nJOIN people p ON pp.People_ID = p.People_ID\nWHERE pp.Earnings > 300000",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "real_estate_properties",
+      "question": "Show the property type descriptions of properties belonging to that code.",
+      "gold_sql": "SELECT T2.property_type_description FROM Properties AS T1 JOIN Ref_Property_Types AS T2 ON T1.property_type_code  =  T2.property_type_code GROUP BY T1.property_type_code",
+      "agent_sql": "SELECT DISTINCT rpt.property_type_description\nFROM Properties p\nJOIN Ref_Property_Types rpt ON p.property_type_code = rpt.property_type_code",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "real_estate_properties",
+      "question": "How many available features are there in total?",
+      "gold_sql": "SELECT count(*) FROM Other_Available_Features",
+      "agent_sql": "SELECT COUNT(*) FROM Other_Available_Features",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "real_estate_properties",
+      "question": "What are the names of properties that are either houses or apartments with more than 1 room?",
+      "gold_sql": "SELECT property_name FROM Properties WHERE property_type_code  =  \"House\" UNION SELECT property_name FROM Properties WHERE property_type_code  =  \"Apartment\" AND room_count  >  1",
+      "agent_sql": "SELECT property_name\nFROM Properties\nWHERE property_type_code IN ('House', 'Apartment')\nAND room_count > 1",
+      "ex_correct": false,
+      "partial_match": true,
+      "jaccard": 0.875,
+      "ex_detail": "jaccard=0.88 (inter=7, union=8)"
+    },
+    {
+      "db_id": "real_estate_properties",
+      "question": "What is the feature type name of feature AirCon?",
+      "gold_sql": "SELECT T2.feature_type_name FROM Other_Available_Features AS T1 JOIN Ref_Feature_Types AS T2 ON T1.feature_type_code  =  T2.feature_type_code WHERE T1.feature_name  =  \"AirCon\"",
+      "agent_sql": "SELECT rft.feature_type_name\nFROM Ref_Feature_Types rft\nJOIN Other_Available_Features oaf ON rft.feature_type_code = oaf.feature_type_code\nWHERE oaf.feature_name = 'AirCon'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "singer",
+      "question": "Show different citizenship of singers and the number of singers of each citizenship.",
+      "gold_sql": "SELECT Citizenship ,  COUNT(*) FROM singer GROUP BY Citizenship",
+      "agent_sql": "SELECT Citizenship, COUNT(*) as number_of_singers\nFROM singer\nGROUP BY Citizenship\nORDER BY number_of_singers DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "singer",
+      "question": "Show the name of singers whose birth year is either 1948 or 1949?",
+      "gold_sql": "SELECT Name FROM singer WHERE Birth_Year  =  1948 OR Birth_Year  =  1949",
+      "agent_sql": "SELECT Name FROM singer WHERE Birth_Year IN (1948, 1949)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "singer",
+      "question": "Please show the most common citizenship of singers.",
+      "gold_sql": "SELECT Citizenship FROM singer GROUP BY Citizenship ORDER BY COUNT(*) DESC LIMIT 1",
+      "agent_sql": "SELECT Citizenship\nFROM singer\nGROUP BY Citizenship\nORDER BY COUNT(*) DESC\nLIMIT 1",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "singer",
+      "question": "Show distinct names of singers that have songs with sales more than 300000.",
+      "gold_sql": "SELECT DISTINCT T1.Name FROM singer AS T1 JOIN song AS T2 ON T1.Singer_ID  =  T2.Singer_ID WHERE T2.Sales  >  300000",
+      "agent_sql": "SELECT DISTINCT s.Name\nFROM singer s\nINNER JOIN song so ON s.Singer_ID = so.Singer_ID\nWHERE so.Sales > 300000",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "singer",
+      "question": "List the name of singers that do not have any song.",
+      "gold_sql": "SELECT Name FROM singer WHERE Singer_ID NOT IN (SELECT Singer_ID FROM song)",
+      "agent_sql": "SELECT Name FROM singer WHERE Singer_ID NOT IN (SELECT DISTINCT Singer_ID FROM song)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "student_transcripts_tracking",
+      "question": "What is the phone number of the man with the first name Timmothy and the last name Ward?",
+      "gold_sql": "SELECT cell_mobile_number FROM Students WHERE first_name  =  'Timmothy' AND last_name  =  'Ward'",
+      "agent_sql": "SELECT cell_mobile_number FROM Students WHERE first_name = 'Timmothy' AND last_name = 'Ward'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "student_transcripts_tracking",
+      "question": "List the section_name in reversed lexicographical order.",
+      "gold_sql": "SELECT section_name FROM Sections ORDER BY section_name DESC",
+      "agent_sql": "SELECT section_name FROM Sections ORDER BY section_name DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "student_transcripts_tracking",
+      "question": "What is the mobile phone number of the student named Timmothy Ward ?",
+      "gold_sql": "select cell_mobile_number from students where first_name  =  'timmothy' and last_name  =  'ward'",
+      "agent_sql": "SELECT cell_mobile_number FROM Students WHERE first_name = 'Timmothy' AND last_name = 'Ward'",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=1)"
+    },
+    {
+      "db_id": "student_transcripts_tracking",
+      "question": "What is the date and id of the transcript with at least 2 courses listed?",
+      "gold_sql": "SELECT T2.transcript_date ,  T1.transcript_id FROM Transcript_Contents AS T1 JOIN Transcripts AS T2 ON T1.transcript_id  =  T2.transcript_id GROUP BY T1.transcript_id HAVING count(*)  >=  2",
+      "agent_sql": "SELECT t.transcript_id, t.transcript_date\nFROM Transcripts t\nWHERE (\n  SELECT COUNT(*)\n  FROM Transcript_Contents tc\n  WHERE tc.transcript_id = t.transcript_id\n) >= 2",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=8)"
+    },
+    {
+      "db_id": "student_transcripts_tracking",
+      "question": "Who are enrolled in 2 degree programs in one semester? List the first name, middle name and last name and the id.",
+      "gold_sql": "SELECT T1.first_name ,  T1.middle_name ,  T1.last_name ,  T1.student_id FROM Students AS T1 JOIN Student_Enrolment AS T2 ON T1.student_id  =  T2.student_id GROUP BY T1.student_id HAVING count(*)  =  2",
+      "agent_sql": "SELECT s.student_id, s.first_name, s.middle_name, s.last_name\nFROM Students s\nWHERE s.student_id IN (\n  SELECT se.student_id\n  FROM Student_Enrolment se\n  GROUP BY se.student_id, se.semester_id\n  HAVING COUNT(DISTINCT se.degree_program_id) = 2\n)",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=4)"
+    },
+    {
+      "db_id": "tvshow",
+      "question": "Find the number of cartoons directed by each of the listed directors.",
+      "gold_sql": "SELECT count(*) ,  Directed_by FROM cartoon GROUP BY Directed_by",
+      "agent_sql": "SELECT Directed_by, COUNT(*) as number_of_cartoons\nFROM Cartoon\nGROUP BY Directed_by\nORDER BY number_of_cartoons DESC",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=6)"
+    },
+    {
+      "db_id": "tvshow",
+      "question": "What are the Package Options of the TV Channels whose series names are Sky Radio?",
+      "gold_sql": "SELECT Package_Option FROM TV_Channel WHERE series_name = \"Sky Radio\";",
+      "agent_sql": "SELECT Package_Option FROM TV_Channel WHERE series_name = 'Sky Radio'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "tvshow",
+      "question": "Find the production code and channel of the most recently aired cartoon .",
+      "gold_sql": "select production_code ,  channel from cartoon order by original_air_date desc limit 1",
+      "agent_sql": "SELECT Production_code, Channel FROM Cartoon ORDER BY Original_air_date DESC LIMIT 1",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "tvshow",
+      "question": "What are the ids of the TV channels that do not have any cartoons directed by Ben Jones?",
+      "gold_sql": "SELECT id FROM TV_Channel EXCEPT SELECT channel FROM cartoon WHERE directed_by  =  'Ben Jones'",
+      "agent_sql": "SELECT DISTINCT id FROM TV_Channel WHERE id NOT IN (SELECT DISTINCT Channel FROM Cartoon WHERE Directed_by = 'Ben Jones')",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "tvshow",
+      "question": "How many cartoons did each director create?",
+      "gold_sql": "SELECT count(*) ,  Directed_by FROM cartoon GROUP BY Directed_by",
+      "agent_sql": "SELECT Directed_by, COUNT(*) as cartoon_count\nFROM Cartoon\nGROUP BY Directed_by\nORDER BY cartoon_count DESC",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=6)"
+    },
+    {
+      "db_id": "voter_1",
+      "question": "How many contestants did not get voted?",
+      "gold_sql": "SELECT count(*) FROM contestants WHERE contestant_number NOT IN ( SELECT contestant_number FROM votes )",
+      "agent_sql": "SELECT COUNT(*) FROM CONTESTANTS WHERE contestant_number NOT IN (SELECT DISTINCT contestant_number FROM VOTES)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "voter_1",
+      "question": "List the contestant numbers and names, ordered by contestant name descending.",
+      "gold_sql": "SELECT contestant_number ,  contestant_name FROM contestants ORDER BY contestant_name DESC",
+      "agent_sql": "SELECT contestant_number, contestant_name FROM CONTESTANTS ORDER BY contestant_name DESC",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "voter_1",
+      "question": "What are the number of votes from state 'NY' or 'CA'?",
+      "gold_sql": "SELECT count(*) FROM votes WHERE state  =  'NY' OR state  =  'CA'",
+      "agent_sql": "SELECT COUNT(*) FROM VOTES WHERE state IN ('NY', 'CA')",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "voter_1",
+      "question": "Return the names of the contestants whose names contain the substring 'Al' .",
+      "gold_sql": "select contestant_name from contestants where contestant_name like \"%al%\"",
+      "agent_sql": "SELECT contestant_name FROM CONTESTANTS WHERE contestant_name LIKE '%Al%'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "voter_1",
+      "question": "List the vote ids, phone numbers and states of all votes.",
+      "gold_sql": "SELECT vote_id ,  phone_number ,  state FROM votes",
+      "agent_sql": "SELECT vote_id, phone_number, state FROM VOTES",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "world_1",
+      "question": "What is the total number of unique official languages spoken in the countries that are founded before 1930?",
+      "gold_sql": "SELECT count(DISTINCT T2.Language) FROM country AS T1 JOIN countrylanguage AS T2 ON T1.Code  =  T2.CountryCode WHERE  IndepYear  <  1930 AND T2.IsOfficial  =  \"T\"",
+      "agent_sql": "SELECT COUNT(DISTINCT Language)\nFROM countrylanguage\nWHERE CountryCode IN (\n  SELECT Code\n  FROM country\n  WHERE IndepYear < 1930 AND IndepYear IS NOT NULL\n)\nAND IsOfficial = 'T'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "world_1",
+      "question": "How many cities in each district have a population that is above the average population across all cities?",
+      "gold_sql": "SELECT count(*) ,  District FROM city WHERE Population  >  (SELECT avg(Population) FROM city) GROUP BY District",
+      "agent_sql": "SELECT District, COUNT(*) as city_count\nFROM city\nWHERE Population > (SELECT AVG(Population) FROM city)\nGROUP BY District\nORDER BY District",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=1078)"
+    },
+    {
+      "db_id": "world_1",
+      "question": "What is the number of distinct languages used around the world?",
+      "gold_sql": "SELECT count(DISTINCT LANGUAGE) FROM countrylanguage",
+      "agent_sql": "SELECT COUNT(DISTINCT Language) FROM countrylanguage",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "world_1",
+      "question": "What is the total population and maximum GNP in Asia?",
+      "gold_sql": "SELECT sum(Population) ,  max(GNP) FROM country WHERE Continent  =  \"Asia\"",
+      "agent_sql": "SELECT SUM(Population) as total_population, MAX(GNP) as maximum_gnp FROM country WHERE Continent = 'Asia'",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "world_1",
+      "question": "What is the most populace city that speaks English?",
+      "gold_sql": "SELECT T1.Name ,  T1.Population FROM city AS T1 JOIN countrylanguage AS T2 ON T1.CountryCode  =  T2.CountryCode WHERE T2.Language  =  \"English\" ORDER BY T1.Population DESC LIMIT 1",
+      "agent_sql": "SELECT c.Name\nFROM city c\nJOIN country co ON c.CountryCode = co.Code\nJOIN countrylanguage cl ON co.Code = cl.CountryCode\nWHERE cl.Language = 'English'\nORDER BY c.Population DESC\nLIMIT 1",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=2)"
+    },
+    {
+      "db_id": "wta_1",
+      "question": "Find the first name and country code of the oldest player.",
+      "gold_sql": "SELECT first_name ,  country_code FROM players ORDER BY birth_date LIMIT 1",
+      "agent_sql": "SELECT first_name, country_code FROM players ORDER BY birth_date ASC LIMIT 1",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "wta_1",
+      "question": "What are the names of tournaments that have more than 10 matches?",
+      "gold_sql": "SELECT tourney_name FROM matches GROUP BY tourney_name HAVING count(*)  >  10",
+      "agent_sql": "SELECT DISTINCT tourney_name\nFROM matches\nGROUP BY tourney_name\nHAVING COUNT(*) > 10",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "wta_1",
+      "question": "What is the first name, country code, and birth date of the player with the most winner rank points across all matches?",
+      "gold_sql": "SELECT T1.first_name ,  T1.country_code ,  T1.birth_date FROM players AS T1 JOIN matches AS T2 ON T1.player_id  =  T2.winner_id ORDER BY T2.winner_rank_points DESC LIMIT 1",
+      "agent_sql": "SELECT p.first_name, p.country_code, p.birth_date\nFROM players p\nWHERE p.player_id = (\n  SELECT winner_id\n  FROM matches\n  ORDER BY winner_rank_points DESC\n  LIMIT 1\n)",
+      "ex_correct": true,
+      "partial_match": false,
+      "jaccard": 1.0,
+      "ex_detail": "exact_match"
+    },
+    {
+      "db_id": "wta_1",
+      "question": "Find the average ranking for each player and their first name.",
+      "gold_sql": "SELECT avg(ranking) ,  T1.first_name FROM players AS T1 JOIN rankings AS T2 ON T1.player_id  =  T2.player_id GROUP BY T1.first_name",
+      "agent_sql": "SELECT p.first_name, AVG(r.ranking) as average_ranking\nFROM players p\nLEFT JOIN rankings r ON p.player_id = r.player_id\nGROUP BY p.player_id, p.first_name\nORDER BY p.first_name",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "agent_error: Could not decode to UTF-8 column 'first_name' with text 'Selin G��Lseren'"
+    },
+    {
+      "db_id": "wta_1",
+      "question": "find the number of players for each country.",
+      "gold_sql": "SELECT count(*) ,  country_code FROM players GROUP BY country_code",
+      "agent_sql": "SELECT country_code, COUNT(DISTINCT player_id) as number_of_players\nFROM players\nGROUP BY country_code\nORDER BY country_code",
+      "ex_correct": false,
+      "partial_match": false,
+      "jaccard": 0.0,
+      "ex_detail": "jaccard=0.00 (inter=0, union=306)"
+    }
+  ]
+}

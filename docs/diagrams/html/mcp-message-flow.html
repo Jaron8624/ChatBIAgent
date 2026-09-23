@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MCP 协议消息流</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; color: #111827; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 20px; }
+.seq { max-width: 980px; margin: 0 auto; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.actors { display: flex; justify-content: space-between; margin-bottom: 12px; padding: 0 20px; }
+.actor { text-align: center; font-weight: 700; font-size: 13px; padding: 8px 12px; border-radius: 6px; }
+.actor.a { background: #eff6ff; border: 1.2px solid #93c5fd; color: #1e40af; }
+.actor.b { background: #fef3c7; border: 1.2px solid #fbbf24; color: #92400e; }
+.actor.c { background: #f3e8ff; border: 1.2px solid #c4b5fd; color: #6b21a8; }
+.lifeline { position: relative; margin: 0 20px; border-left: 2px dashed #d1d5db; border-right: 2px dashed #d1d5db; height: 540px; }
+.col-l { position: absolute; left: -20px; top: 0; bottom: 0; width: 2px; background: transparent; }
+.msg { position: absolute; height: 36px; display: flex; align-items: center; font-size: 11.5px; }
+.msg .arr { flex: 1; border-top: 1.5px solid #9ca3af; position: relative; margin: 0 8px; }
+.msg .arr::after { content: "▶"; position: absolute; right: -2px; top: -10px; color: #9ca3af; font-size: 11px; }
+.msg .arr.rev::after { content: "◀"; right: auto; left: -2px; }
+.msg .arr.rev { border-top: 1.5px dashed #6b7280; }
+.msg .label { background: #fff; padding: 1px 6px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.msg .label.req { color: #1e40af; border: 1px solid #93c5fd; }
+.msg .label.res { color: #166534; border: 1px solid #86efac; }
+.msg .label.notif { color: #92400e; border: 1px solid #fbbf24; }
+.note { position: absolute; right: 4px; font-size: 10.5px; color: #6b7280; background: #f9fafb; padding: 2px 6px; border-radius: 4px; max-width: 180px; }
+.phase { position: absolute; left: -8px; font-size: 10px; font-weight: 700; color: #6b21a8; writing-mode: vertical-rl; }
+</style>
+</head>
+<body>
+
+<h1>MCP 协议生命周期消息流（stdio 传输）</h1>
+<p class="sub">Agent ↔ MCP Server · JSON-RPC 2.0 · 三阶段握手 + 工具调用 + id 匹配</p>
+
+<div class="seq">
+  <div class="actors">
+    <div class="actor a">ReAct Agent<br><span style="font-weight:400; font-size:11px;">(Caller)</span></div>
+    <div class="actor b">MCPToolServer<br><span style="font-weight:400; font-size:11px;">(内置/自研)</span></div>
+    <div class="actor c">外部 MCP Server<br><span style="font-weight:400; font-size:11px;">(stdio 子进程)</span></div>
+  </div>
+
+  <div class="lifeline">
+
+    <!-- 阶段1：握手 -->
+    <div class="phase" style="top:0; height:120px;">握</div>
+    <div class="msg" style="top:6px; left:0; right:66%;">
+      <span class="label req">initialize</span>
+      <div class="arr"></div>
+    </div>
+    <div class="msg" style="top:42px; left:0; right:66%;">
+      <div class="arr rev"></div>
+      <span class="label res">result {protocolVersion, capabilities}</span>
+    </div>
+    <div class="msg" style="top:78px; left:0; right:66%;">
+      <span class="label notif">initialized (notification)</span>
+      <div class="arr"></div>
+    </div>
+
+    <!-- 阶段2：工具发现 -->
+    <div class="phase" style="top:130px; height:80px;">发</div>
+    <div class="msg" style="top:130px; left:0; right:66%;">
+      <span class="label req">tools/list</span>
+      <div class="arr"></div>
+    </div>
+    <div class="msg" style="top:166px; left:0; right:66%;">
+      <div class="arr rev"></div>
+      <span class="label res">result {tools: [execute_sql, recall_context...]}</span>
+    </div>
+    <div class="note" style="top:130px;">工具列表缓存到本地，后续不再重复拉取</div>
+
+    <!-- 阶段3：调用 -->
+    <div class="phase" style="top:220px; height:130px;">调</div>
+    <div class="msg" style="top:220px; left:0; right:66%;">
+      <span class="label req">tools/call id=42</span>
+      <div class="arr"></div>
+    </div>
+    <div class="msg" style="top:258px; left:34%; right:32%;">
+      <span class="label req">透传 tools/call id=42</span>
+      <div class="arr"></div>
+    </div>
+    <div class="msg" style="top:296px; left:34%; right:32%;">
+      <div class="arr rev"></div>
+      <span class="label res">result id=42 {rows: [...]}</span>
+    </div>
+    <div class="note" style="top:258px;">stdio: readline 按 id 匹配<br>无关 notification 跳过</div>
+
+    <!-- 回传 -->
+    <div class="msg" style="top:340px; left:0; right:66%;">
+      <div class="arr rev"></div>
+      <span class="label res">result id=42 → Agent</span>
+    </div>
+
+    <!-- 错误路径 -->
+    <div class="phase" style="top:400px; height:130px;">错</div>
+    <div class="msg" style="top:400px; left:0; right:66%;">
+      <span class="label req">tools/call id=43 (非法 SQL)</span>
+      <div class="arr"></div>
+    </div>
+    <div class="msg" style="top:438px; left:0; right:66%;">
+      <div class="arr rev"></div>
+      <span class="label res" style="color:#991b1b; border-color:#fca5a5;">error id=43 {code:-32603, message:"SQL Guard 拒绝"}</span>
+    </div>
+    <div class="note" style="top:438px;">错误码 -32603 (内部错误)<br>Agent 进入 Self-Reflect 重写</div>
+
+    <div class="msg" style="top:494px; left:0; right:66%;">
+      <span class="label notif">notifications/cancel (可选)</span>
+      <div class="arr"></div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

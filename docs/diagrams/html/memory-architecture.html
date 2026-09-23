@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>三级分层记忆架构</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body {
+    width: 1180px; padding: 44px 50px;
+    background:
+      linear-gradient(rgba(255,255,255,.92), rgba(255,255,255,.92)),
+      repeating-linear-gradient(0deg, transparent, transparent 39px, #dbeafe 40px),
+      repeating-linear-gradient(90deg, transparent, transparent 39px, #dbeafe 40px);
+    background-color: #f0f7ff;
+  }
+  h1 { font-size: 32px; color: #1e3a8a; margin-bottom: 6px; }
+  .sub { font-size: 16px; color: #64748b; margin-bottom: 24px; }
+  .row { display: flex; align-items: stretch; gap: 14px; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: #fff; border: 2.5px solid #3b82f6; border-radius: 16px;
+    padding: 14px 18px; box-shadow: 4px 4px 0 #bfdbfe; flex: 1;
+  }
+  .card.green { border-color: #10b981; box-shadow: 4px 4px 0 #a7f3d0; }
+  .card.orange { border-color: #f59e0b; box-shadow: 4px 4px 0 #fde68a; }
+  .card.purple { border-color: #8b5cf6; box-shadow: 4px 4px 0 #ddd6fe; }
+  .card.gray { border-color: #94a3b8; box-shadow: 4px 4px 0 #e2e8f0; }
+  .card h3 { font-size: 17px; margin-bottom: 6px; color: #1e293b; }
+  .card p, .card li { font-size: 13.6px; color: #475569; line-height: 1.68; }
+  .card code { background: #f1f5f9; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: #be185d; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb; margin-bottom: 6px; font-weight: 600; }
+  .green .tag { background: #ecfdf5; color: #059669; }
+  .orange .tag { background: #fffbeb; color: #d97706; }
+  .purple .tag { background: #f5f3ff; color: #7c3aed; }
+  .gray .tag { background: #f8fafc; color: #475569; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2563eb; font-weight: 700; flex-shrink: 0; }
+  .arrow-v { text-align: center; font-size: 22px; color: #2563eb; font-weight: 700; padding: 4px 0; }
+  .section-title { font-size: 15px; font-weight: 700; color: #1e3a8a; background: #dbeafe; display: inline-block; padding: 3px 14px; border-radius: 999px; margin-bottom: 10px; width: fit-content; }
+  .formula { background: #f8fafc; border: 1.5px dashed #94a3b8; border-radius: 12px; padding: 12px 18px; font-size: 15px; color: #1e293b; font-family: "SF Mono", Menlo, monospace; }
+  .key { background: #1e3a8a; color: #fff; border-radius: 14px; padding: 13px 22px; margin-top: 20px; font-size: 15.5px; line-height: 1.8; }
+  .key b { color: #fde68a; }
+</style>
+</head>
+<body>
+  <h1>三级分层记忆：语义 / 情节 / 程序</h1>
+  <div class="sub">借鉴认知心理学的长时记忆三分法——不分级的话，"上周的临时查询条件"会被当成"长期偏好"引用，回答被污染</div>
+
+  <div class="section-title">写入侧：三类记忆分别存什么</div>
+  <div class="row">
+    <div class="card">
+      <span class="tag">semantic 语义记忆</span>
+      <h3>稳定事实与偏好</h3>
+      <p>例："用户关注的销售额口径是含税口径"</p>
+      <p style="margin-top:4px">回答时<b>补充知识</b>：让模型按用户认可的口径说话</p>
+    </div>
+    <div class="card green">
+      <span class="tag">episodic 情节记忆</span>
+      <h3>事件序列</h3>
+      <p>例："上周三用户查过 11 月异动归因"</p>
+      <p style="margin-top:4px">回答时<b>保证连贯</b>："再查一下"知道在延续哪件事</p>
+    </div>
+    <div class="card purple">
+      <span class="tag">procedural 程序记忆</span>
+      <h3>技能与习惯</h3>
+      <p>例："用户偏好带 SQL 和数据表格的回答"</p>
+      <p style="margin-top:4px">回答时<b>负责个性化</b>：输出形式贴合用户习惯</p>
+    </div>
+  </div>
+
+  <div class="arrow-v">▼ 统一存入 Milvus 记忆集合（每条带 memory_type / importance / created_at / last_access_at 元数据）</div>
+
+  <div class="section-title">召回侧：按类型并行双路检索 → RRF → 融合排序</div>
+  <div class="row">
+    <div class="card gray" style="max-width: 270px;">
+      <span class="tag">每类记忆独立检索</span>
+      <p>按 <code>memory_type</code> 过滤 + <code>user_id</code> 分区隔离；每类并行发起<b>稠密向量 + BM25 稀疏</b>两路，RRF 融合（Milvus 原生 hybrid_search + RRFRanker）</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="col" style="flex: 1;">
+      <div class="card orange">
+        <span class="tag">融合排序公式</span>
+        <div class="formula">score = α×语义相似度 + β×时近性(指数衰减) + γ×重要性</div>
+        <p style="margin-top:6px">语义相近但半年前的事件，会输给语义稍弱但刚发生且重要的记忆——解决"召回太多、该信哪条"</p>
+      </div>
+      <div class="card green">
+        <span class="tag">冲突解决</span>
+        <p>新记忆与已有记忆语义高度相似但内容矛盾时，<b>以时近性优先更新旧条目</b>——不允许两条相反口径共存，否则检索时同时召回、模型随机选一条，回答不可控</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="key">一句话总结：<b>语义记忆补充知识、情节记忆保证连贯、程序记忆负责个性化</b>——三类各司其职互不干扰；时近性 + 重要性参与排序，保证"最近说的、重要的"优先于"很久以前说的"。</div>
+</body>
+</html>

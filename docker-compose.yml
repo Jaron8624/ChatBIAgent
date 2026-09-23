@@ -1,0 +1,130 @@
+# NexusMind 一键部署编排
+# 使用：cp .env.example .env && 编辑 .env 填入 API Key && docker compose up -d
+#
+# 说明：
+# - milvus/etcd/minio：完整版向量数据库（生产级）
+# - postgres / redis：业务数据库与会话缓存
+# - backend：FastAPI 服务（自动等待依赖就绪后启动）
+# - CLI 在宿主机运行：python cli.py chat（默认连 localhost:8000）
+
+services:
+  # ========== Milvus 向量数据库 ==========
+  etcd:
+    container_name: nexusmind-etcd
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ./docker-data/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  minio:
+    container_name: nexusmind-minio
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - ./docker-data/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus:
+    container_name: nexusmind-milvus
+    image: milvusdb/milvus:v3.0.0
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      MINIO_REGION: us-east-1
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ./docker-data/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  # ========== PostgreSQL ==========
+  postgres:
+    container_name: nexusmind-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexusmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexusmind123}
+      POSTGRES_DB: echomind_db
+    volumes:
+      - ./docker-data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexusmind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ========== Redis ==========
+  redis:
+    container_name: nexusmind-redis
+    image: redis:7-alpine
+    volumes:
+      - ./docker-data/redis:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ========== FastAPI 后端 ==========
+  backend:
+    container_name: nexusmind-backend
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    env_file: .env
+    environment:
+      # 覆盖 .env 中的本地地址，指向 compose 内部服务
+      Milvus_url: http://milvus:19530
+      Token: root:Milvus
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

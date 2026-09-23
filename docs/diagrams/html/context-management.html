@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>上下文管理三件套</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 24px; color: #1f2937; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 6px; color: #111827; }
+.sub { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 20px; }
+.flow { max-width: 1080px; margin: 0 auto; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.stage { flex: 1; min-width: 300px; max-width: 340px; background: #fff; border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.stage h2 { font-size: 14px; text-align: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px dashed #d1d5db; }
+.stage.a h2 { color: #1e40af; }
+.stage.b h2 { color: #92400e; }
+.stage.c h2 { color: #6b21a8; }
+.stage .when { font-size: 11px; color: #6b7280; background: #f9fafb; padding: 5px 8px; border-radius: 5px; margin-bottom: 8px; text-align: center; }
+.box { background: #eff6ff; border: 1.2px solid #93c5fd; border-radius: 7px; padding: 8px 10px; font-size: 12px; margin-bottom: 6px; }
+.box .t { font-weight: 700; color: #1e40af; margin-bottom: 2px; }
+.stage.b .box { background: #fef3c7; border-color: #fbbf24; }
+.stage.b .box .t { color: #92400e; }
+.stage.c .box { background: #f3e8ff; border-color: #c4b5fd; }
+.stage.c .box .t { color: #6b21a8; }
+.box .d { color: #4b5563; font-size: 11px; line-height: 1.45; }
+.code { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; background: #f9fafb; padding: 6px; border-radius: 4px; color: #374151; margin-top: 4px; white-space: pre-wrap; }
+.arrow { text-align: center; font-size: 22px; color: #9ca3af; align-self: center; }
+</style>
+</head>
+<body>
+
+<h1>上下文管理三件套：组装 → 压缩 → 回忆</h1>
+<p class="sub">QueryRewriter 上下文聚合 · compress_if_needed 自动压缩 · ContextStore + recall_context 按需回忆</p>
+
+<div class="flow">
+
+  <!-- 组装 -->
+  <div class="stage a">
+    <h2>① 上下文组装（QueryRewriter）</h2>
+    <div class="when">时机：每次 Agent 执行前</div>
+    <div class="box">
+      <div class="t">代词消解</div>
+      <div class="d">"那个" / "它" → 回指上轮实体</div>
+    </div>
+    <div class="box">
+      <div class="t">多轮拼接</div>
+      <div class="d">历史 3 轮 + 当前 query 拼成完整自然语言</div>
+    </div>
+    <div class="box">
+      <div class="t">输出：rewritten_query</div>
+      <div class="d">下游 SchemaLinker / 意图识别 都用它</div>
+      <div class="code">"那个销售额" →
+"2024Q3 华东区销售额"</div>
+    </div>
+  </div>
+
+  <div class="arrow">→</div>
+
+  <!-- 压缩 -->
+  <div class="stage b">
+    <h2>② 自动压缩（compress_if_needed）</h2>
+    <div class="when">时机：每轮工具结果回传后 · 阈值触发</div>
+    <div class="box">
+      <div class="t">Token 阈值检测</div>
+      <div class="d">_tokens() 估算 · 超 6000 触发压缩</div>
+    </div>
+    <div class="box">
+      <div class="t">大块存档</div>
+      <div class="d">完整工具输出写 ContextStore · ref_id=ctx_xxx</div>
+    </div>
+    <div class="box">
+      <div class="t">占位符替换</div>
+      <div class="d">原文 → "【内容过长已存档 ref_id=ctx_a1b2c3d4e5】"</div>
+      <div class="code">原 5KB 行集 → 一行占位符
+省 ~90% Token</div>
+    </div>
+  </div>
+
+  <div class="arrow">→</div>
+
+  <!-- 回忆 -->
+  <div class="stage c">
+    <h2>③ 按需回忆（recall_context）</h2>
+    <div class="when">时机：Agent 在 ReAct 循环中自主调用</div>
+    <div class="box">
+      <div class="t">三种读取模式</div>
+      <div class="d">full / tail(末尾N行) / grep(正则过滤)</div>
+    </div>
+    <div class="box">
+      <div class="t">grep 精确定位</div>
+      <div class="d">re.search 逐行匹配 · 最多返回 100 行</div>
+    </div>
+    <div class="box">
+      <div class="t">full 长度保护</div>
+      <div class="d">&gt; 50KB 拒绝全量 · 提示改用 tail/grep</div>
+      <div class="code">recall_context(
+  ref_id="ctx_a1b2...",
+  mode="grep",
+  pattern="华东")</div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
