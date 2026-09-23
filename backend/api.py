@@ -758,6 +758,8 @@ async def evaluate_single(request: Request):
         "evaluation_id": result.evaluation_id,
         "overall_score": result.overall_score,
         "passed": result.passed,
+        "status": result.status,
+        "error": result.error,
         "dimensions": [
             {"dimension": d.dimension, "score": d.score, "comment": d.comment}
             for d in result.dimensions
@@ -786,6 +788,7 @@ async def evaluate_batch(request: Request):
         "total": len(results),
         "passed": sum(1 for r in results if r.passed),
         "failed": sum(1 for r in results if not r.passed),
+        "infra_errors": sum(1 for r in results if r.status != "success"),
         "avg_score": round(
             sum(r.overall_score for r in results) / len(results), 2
         ) if results else 0,
@@ -794,6 +797,8 @@ async def evaluate_batch(request: Request):
                 "evaluation_id": r.evaluation_id,
                 "overall_score": r.overall_score,
                 "passed": r.passed,
+                "status": r.status,
+                "error": r.error,
             }
             for r in results
         ],
@@ -1064,7 +1069,7 @@ async def get_evolution_rules(
 
 @router.post("/evolution/review")
 async def review_evolution_rule(request: Request):
-    """对进化规则进行决策（accept / merge / discard）"""
+    """Approve a rule for Harness evaluation, merge evaluation, or discard it."""
     try:
         body = await request.json()
     except Exception:
@@ -1077,7 +1082,11 @@ async def review_evolution_rule(request: Request):
 
     engine = get_evolution_engine()
     ok = engine.review_rule(rule_id, decision)
-    return {"success": ok, "message": f"规则已{decision}" if ok else "规则不存在"}
+    if ok and decision in ("accept", "merge"):
+        message = "规则已进入 Harness 候选区，尚未影响正式回答"
+    else:
+        message = f"规则已{decision}" if ok else "规则不存在或候选登记失败"
+    return {"success": ok, "message": message}
 
 
 @router.post("/evolution/auto-review")
@@ -1085,10 +1094,10 @@ async def auto_review_rules(
     threshold: float = 0.8,
     user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
 ):
-    """自动决策高置信度规则"""
+    """Queue high-confidence rules as candidates without activating them."""
     engine = get_evolution_engine()
-    accepted = engine.auto_review(threshold)
-    return {"success": True, "accepted_count": accepted}
+    queued = engine.auto_review(threshold)
+    return {"success": True, "candidate_count": queued, "accepted_count": 0}
 
 
 @router.get("/evolution/stats")
@@ -1117,6 +1126,240 @@ async def trigger_evolution_tick(
     from evaluation.evolution_loop import get_evolution_loop
     result = await get_evolution_loop().tick()
     return {"success": True, "result": result}
+
+
+# ==================== Harness：版本化实验、门禁、晋升与回滚 ====================
+
+@router.get("/harness/datasets")
+async def list_harness_datasets(
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    service = get_harness_service()
+    return {
+        "success": True,
+        "default_dataset_version_id": service.default_dataset_version_id,
+        "datasets": service.store.list_datasets(),
+    }
+
+
+@router.get("/harness/candidates")
+async def list_harness_candidates(
+    status: Optional[str] = None,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "candidates": get_harness_service().store.list_candidates(status=status),
+    }
+
+
+@router.get("/harness/experiments")
+async def list_harness_experiments(
+    limit: int = 50,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "experiments": get_harness_service().store.list_experiments(limit=min(limit, 200)),
+    }
+
+
+@router.get("/harness/experiments/{experiment_id}")
+async def get_harness_experiment(
+    experiment_id: str,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    experiment = get_harness_service().store.get_experiment(experiment_id)
+    if not experiment:
+        raise HTTPException(status_code=404, detail="实验不存在")
+    return {"success": True, "experiment": experiment}
+
+
+@router.get("/harness/audit")
+async def list_harness_audit(
+    entity_id: Optional[str] = None,
+    limit: int = 100,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "events": get_harness_service().store.list_audit(entity_id, min(limit, 500)),
+    }
+
+
+@router.get("/harness/annotations")
+async def list_harness_annotations(
+    subject_id: Optional[str] = None,
+    limit: int = 100,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "annotations": get_harness_service().store.list_human_annotations(
+            subject_id=subject_id,
+            limit=min(limit, 500),
+        ),
+    }
+
+
+@router.post("/harness/annotations")
+async def add_harness_annotation(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    subject_type = str(body.get("subject_type", "case_result")).strip()
+    subject_id = str(body.get("subject_id", "")).strip()
+    metric = str(body.get("metric", "overall_quality")).strip()
+    if not subject_id:
+        raise HTTPException(status_code=400, detail="subject_id 不能为空")
+    score = body.get("score")
+    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    from harness.service import get_harness_service
+    try:
+        annotation_id = get_harness_service().store.add_human_annotation(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            metric=metric,
+            label=str(body.get("label", "")),
+            score=float(score) if score is not None else None,
+            comment=str(body.get("comment", "")),
+            annotator=actor,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "annotation_id": annotation_id}
+
+
+@router.get("/harness/judge-calibration")
+async def get_harness_judge_calibration(
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "calibration": get_harness_service().store.judge_calibration_summary(),
+    }
+
+
+@router.post("/harness/evolution/evaluate")
+async def evaluate_evolution_candidate(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    rule_id = str(body.get("rule_id", ""))
+    dataset_version_id = body.get("dataset_version_id")
+    engine = get_evolution_engine()
+    rule = engine._rules.get(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    if rule.status not in ("candidate", "evaluated", "rejected"):
+        raise HTTPException(status_code=409, detail="规则必须先进入 Harness 候选区")
+    from harness.service import get_harness_service
+    try:
+        result = await get_harness_service().evaluate_evolution_rule(
+            rule=rule,
+            orchestrator=get_orchestrator(),
+            judge=get_evaluator().judge,
+            dataset_version_id=dataset_version_id,
+        )
+        gate = result["gate"]
+        rule.status = "evaluated" if gate["passed"] else "rejected"
+        engine._save_rules()
+        return {"success": True, **result}
+    except Exception as exc:
+        logger.error(f"Harness 候选实验失败: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"候选实验失败: {exc}")
+
+
+@router.get("/evolution/shadow")
+async def get_evolution_shadow(
+    rule_id: str,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    engine = get_evolution_engine()
+    rule = engine._rules.get(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    from harness.service import get_harness_service
+    candidate = None
+    gate = None
+    if rule.harness_candidate_id:
+        service = get_harness_service()
+        candidate = service.store.get_candidate(rule.harness_candidate_id)
+        gate = service.store.get_latest_gate(rule.harness_candidate_id)
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "rule_status": rule.status,
+        "candidate": candidate,
+        "latest_gate": gate,
+        "affects_production": rule.status == "active",
+    }
+
+
+@router.post("/evolution/promote")
+async def promote_evolution_rule(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    rule_id = str(body.get("rule_id", ""))
+    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    from harness.promotion import PromotionManager
+    from harness.service import get_harness_service
+    try:
+        result = PromotionManager(get_harness_service()).promote_rule(
+            get_evolution_engine(), rule_id, actor
+        )
+        return {"success": True, "promotion": result}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/evolution/rollback")
+async def rollback_evolution_rule(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    rule_id = str(body.get("rule_id", ""))
+    reason = str(body.get("reason", "manual rollback"))
+    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    from harness.promotion import PromotionManager
+    from harness.service import get_harness_service
+    try:
+        result = PromotionManager(get_harness_service()).rollback_rule(
+            get_evolution_engine(), rule_id, actor, reason
+        )
+        return {"success": True, "rollback": result}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 # ==================== 新增：会话恢复（Session）接口 ====================

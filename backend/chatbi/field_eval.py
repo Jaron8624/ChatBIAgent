@@ -189,6 +189,38 @@ def record_bad_case(
     }
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    # Keep the legacy JSONL export for compatibility, while feeding the same
+    # sample into the central Harness repository used by evaluation/evolution.
+    try:
+        from harness.store import HarnessStore
+        HarnessStore().add_bad_case({
+            "bad_case_id": f"field_{case_id}",
+            "source": source,
+            "query": question,
+            "response": agent_sql,
+            "context": gold_sql,
+            "overall_score": round(
+                ((field_result.row_recall + field_result.cell_accuracy) / 2) * 10,
+                4,
+            ),
+            "dimensions": [
+                {
+                    "dimension": "行召回率",
+                    "score": round(field_result.row_recall * 10, 4),
+                    "comment": "检查结果是否漏行",
+                },
+                {
+                    "dimension": "单元格准确率",
+                    "score": round(field_result.cell_accuracy * 10, 4),
+                    "comment": "检查字段值是否正确",
+                },
+            ],
+            "evaluation_status": "success",
+            "processing_status": status,
+            "created_at": entry["timestamp"],
+        })
+    except Exception as exc:
+        logger.warning("字段级 Bad Case 写入统一 Harness 失败: %s", exc)
     return str(path)
 
 
@@ -226,6 +258,11 @@ def update_bad_case_status(case_id: str, new_status: str) -> int:
             lines.append(json.dumps(entry, ensure_ascii=False))
         if changed:
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        from harness.store import HarnessStore
+        HarnessStore().update_bad_case_status(f"field_{case_id}", new_status)
+    except Exception as exc:
+        logger.warning("字段级 Bad Case 状态同步失败: %s", exc)
     return updated
 
 

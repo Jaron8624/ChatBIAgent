@@ -35,10 +35,16 @@ class EvolutionRule:
     action_prompt: str            # 对应的改进 prompt/规则
     source_feedback: str          # 原始反馈内容
     confidence: float             # 规则置信度 0-1
-    status: str = "pending"       # pending / accepted / merged / discarded
+    status: str = "pending"       # pending / candidate / evaluated / active / rejected / rolled_back / discarded
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     usage_count: int = 0
     success_count: int = 0
+    version: str = "1.0.0"
+    intended_action: str = "accept"
+    harness_candidate_id: str = ""
+    active_skill_id: str = ""
+    rollback_snapshot_id: str = ""
+    activated_at: str = ""
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -222,9 +228,17 @@ AI 回答：{response}
 
     @staticmethod
     def _text_similarity(a: str, b: str) -> float:
-        """简单文本相似度（Jaccard）"""
-        set_a = set(a.lower().split())
-        set_b = set(b.lower().split())
+        """Token and character n-gram Jaccard that works for Chinese and English."""
+        def tokens(text: str) -> set:
+            normalized = re.sub(r"\s+", "", text.lower())
+            if not normalized:
+                return set()
+            chars = {normalized[i:i + 2] for i in range(max(1, len(normalized) - 1))}
+            words = set(re.findall(r"[a-z0-9_]+", text.lower()))
+            return chars | words
+
+        set_a = tokens(a)
+        set_b = tokens(b)
         if not set_a or not set_b:
             return 0.0
         intersection = len(set_a & set_b)
@@ -270,13 +284,22 @@ AI 回答：{response}
         if not rule:
             return False
 
-        if decision == "accept":
-            rule.status = "accepted"
-            # 注册为正式 Skill
-            self._register_as_skill(rule)
-        elif decision == "merge":
-            rule.status = "merged"
-            self._merge_into_existing_skill(rule)
+        if decision in ("accept", "merge"):
+            # Human review approves evaluation, not production activation.
+            # The rule remains inert until a versioned baseline/candidate run
+            # passes the Harness Gate and an explicit promote call is made.
+            rule.status = "candidate"
+            rule.intended_action = decision
+            try:
+                from harness.service import get_harness_service
+                candidate = get_harness_service().register_evolution_rule(
+                    rule, actor="evolution_review"
+                )
+                rule.harness_candidate_id = candidate.candidate_id
+            except Exception as exc:
+                logger.error(f"规则进入 Harness 候选区失败: {exc}")
+                rule.status = "pending"
+                return False
         elif decision == "discard":
             rule.status = "discarded"
         else:
@@ -286,7 +309,7 @@ AI 回答：{response}
         logger.info(f"规则 {rule_id} 已决策: {decision}")
         return True
 
-    def _register_as_skill(self, rule: EvolutionRule):
+    def _register_as_skill(self, rule: EvolutionRule) -> str:
         """将接受的规则注册为正式 Skill"""
         skill = Skill(
             name=f"evolved_{rule.rule_id}",
@@ -296,15 +319,18 @@ AI 回答：{response}
             tags=["auto-evolved", "feedback-driven"],
         )
         try:
-            self._skills_manager.create_skill(skill)
+            skill_id = self._skills_manager.create_skill(skill)
             logger.info(f"规则已注册为 Skill: {skill.name}")
+            return skill_id
         except ValueError:
             # 已存在则更新
             existing = self._skills_manager.get_skill_by_name(skill.name)
             if existing:
                 self._skills_manager.update_skill(existing.id, {"prompt_template": rule.action_prompt})
+                return existing.id
+        return ""
 
-    def _merge_into_existing_skill(self, rule: EvolutionRule):
+    def _merge_into_existing_skill(self, rule: EvolutionRule) -> tuple[str, str]:
         """将规则合并到现有 Skill 中"""
         # 查找最相似的现有 Skill
         best_skill = None
@@ -317,10 +343,16 @@ AI 回答：{response}
 
         if best_skill and best_sim > 0.6:
             sid = best_skill.get("id", "")
+            snapshot_id = self._skills_manager.snapshot(sid)
+            if not snapshot_id:
+                raise RuntimeError("cannot create rollback snapshot before Skill merge")
             old_prompt = best_skill.get("prompt_template", "")
             merged_prompt = f"{old_prompt}\n\n# 进化规则（{rule.rule_id}）\n{rule.action_prompt}"
-            self._skills_manager.update_skill(sid, {"prompt_template": merged_prompt})
+            if not self._skills_manager.update_skill(sid, {"prompt_template": merged_prompt}):
+                raise RuntimeError("cannot update target Skill during merge")
             logger.info(f"规则合并到 Skill: {best_skill.get('name')}")
+            return sid, snapshot_id
+        raise RuntimeError("no sufficiently similar Skill found for merge")
 
     # ==================== 查询与统计 ====================
 
@@ -328,7 +360,7 @@ AI 回答：{response}
         """获取待决策的规则列表"""
         return [
             r.to_dict() for r in self._rules.values()
-            if r.status == "pending"
+            if r.status in ("pending", "candidate", "evaluating", "evaluated")
         ]
 
     def get_all_rules(self) -> List[Dict]:
@@ -344,19 +376,58 @@ AI 回答：{response}
             "total_rules": len(self._rules),
             "status_distribution": status_count,
             "pending_review": status_count.get("pending", 0),
-            "accepted": status_count.get("accepted", 0),
-            "merged": status_count.get("merged", 0),
+            "candidates": sum(status_count.get(name, 0) for name in ("candidate", "evaluating", "evaluated")),
+            "active": status_count.get("active", 0),
+            "rejected": status_count.get("rejected", 0),
+            "rolled_back": status_count.get("rolled_back", 0),
             "discarded": status_count.get("discarded", 0),
         }
 
     # ==================== 批量自动决策 ====================
 
     def auto_review(self, confidence_threshold: float = 0.8):
-        """自动决策高置信度规则"""
-        accepted = 0
+        """Queue high-confidence rules for Harness evaluation; never activate them."""
+        queued = 0
         for rule in list(self._rules.values()):
             if rule.status == "pending" and rule.confidence >= confidence_threshold:
-                self.review_rule(rule.rule_id, "accept")
-                accepted += 1
-        logger.info(f"自动决策完成: 接受了 {accepted} 条高置信度规则")
-        return accepted
+                if self.review_rule(rule.rule_id, "accept"):
+                    queued += 1
+        logger.info(f"自动筛选完成: {queued} 条规则进入 Harness 候选区")
+        return queued
+
+    def activate_rule(self, rule_id: str) -> bool:
+        """Activate a rule only after PromotionManager verifies a passing Gate."""
+        rule = self._rules.get(rule_id)
+        if not rule or rule.status not in ("candidate", "evaluated"):
+            return False
+        if rule.intended_action == "merge":
+            skill_id, snapshot_id = self._merge_into_existing_skill(rule)
+            rule.active_skill_id = skill_id
+            rule.rollback_snapshot_id = snapshot_id
+        else:
+            rule.active_skill_id = self._register_as_skill(rule)
+            if not rule.active_skill_id:
+                return False
+        rule.status = "active"
+        rule.activated_at = datetime.now().isoformat()
+        self._save_rules()
+        return True
+
+    def rollback_rule(self, rule_id: str) -> bool:
+        """Remove an active evolved Skill and keep the audit-friendly rule record."""
+        rule = self._rules.get(rule_id)
+        if not rule or rule.status != "active":
+            return False
+        if rule.intended_action == "merge":
+            if not rule.rollback_snapshot_id:
+                return False
+            restored_id = self._skills_manager.restore_snapshot(rule.rollback_snapshot_id)
+            if not restored_id:
+                return False
+            rule.active_skill_id = restored_id
+        elif rule.active_skill_id:
+            if not self._skills_manager.delete_skill(rule.active_skill_id):
+                return False
+        rule.status = "rolled_back"
+        self._save_rules()
+        return True

@@ -60,7 +60,9 @@ class EvolutionLoop:
             "last_run_at": None,
             "bad_cases_seen": 0,
             "new_rules": 0,
-            "auto_accepted": 0,
+            "candidates_queued": 0,
+            "failed": 0,
+            "last_error": "",
         }
         logger.info(
             f"EvolutionLoop 初始化: interval={self.interval}s, "
@@ -101,7 +103,7 @@ class EvolutionLoop:
         """执行一轮进化：拉取未处理 BadCase → 抽取规则 → 自动决策
 
         Returns:
-            {"bad_cases_seen": n, "new_rules": n, "auto_accepted": n}
+            {"bad_cases_seen": n, "new_rules": n, "candidates_queued": n, "failed": n}
         """
         # 延迟导入避免循环依赖（api.py 也导入本模块）
         from api import get_evaluator
@@ -119,52 +121,80 @@ class EvolutionLoop:
             "last_run_at": datetime.now().isoformat(),
             "bad_cases_seen": len(pending),
             "new_rules": 0,
-            "auto_accepted": 0,
+            "candidates_queued": 0,
+            "failed": 0,
+            "last_error": "",
         }
 
         if not pending:
             self.last_tick_result.update(result)
             return result
 
-        # EvaluationResult(0-1 分) → feedback_record(0-10 分制，与引擎约定一致)
+        # EvaluationResult already uses a validated 1-10 scale.
         feedback_records = []
         for c in pending:
             dims_text = "; ".join(
-                f"{d.get('name', '')}: {d.get('comment', '')}"
+                f"{getattr(d, 'dimension', '')}: {getattr(d, 'comment', '')}"
                 for d in (c.dimensions or [])
-                if isinstance(d, dict)
             )
             feedback_records.append({
                 "query": c.query,
                 "response": c.response,
                 "feedback": f"评测未通过(总分 {c.overall_score:.2f})。{dims_text}",
-                "score": round(c.overall_score * 10, 1),
+                "score": round(c.overall_score, 1),
             })
 
+        succeeded = False
         try:
             new_rules = await self.engine.evolve_from_feedback(
                 feedback_records, llm_client=self._get_llm()
             )
             result["new_rules"] = len(new_rules)
 
-            # 高置信度规则自动接受，低置信度保持 pending 等人工评审
+            # High-confidence rules may enter the candidate registry, but can
+            # never become active until baseline/candidate evaluation and Gate.
             if self.auto_accept_threshold > 0 and new_rules:
-                result["auto_accepted"] = self.engine.auto_review(
+                result["candidates_queued"] = self.engine.auto_review(
                     self.auto_accept_threshold
                 )
+            succeeded = True
 
             logger.info(
                 f"[EvolutionLoop] 本轮处理 {len(pending)} 条 BadCase，"
                 f"抽取 {len(new_rules)} 条新规则，"
-                f"自动接受 {result['auto_accepted']} 条"
+                f"进入候选区 {result['candidates_queued']} 条"
             )
         except Exception as e:
             logger.error(f"[EvolutionLoop] 进化失败: {e}")
+            result["failed"] = len(pending)
+            result["last_error"] = str(e)
         finally:
-            # 无论成功与否都标记已处理，避免坏样本反复触发
-            for c in pending:
-                self._processed.add(c.evaluation_id)
-            self._save_processed()
+            # Only successful batches are acknowledged. Failed batches remain
+            # retryable instead of being silently lost.
+            if succeeded:
+                for c in pending:
+                    self._processed.add(c.evaluation_id)
+                self._save_processed()
+                try:
+                    from harness.service import get_harness_service
+                    store = get_harness_service().store
+                    for c in pending:
+                        store.update_bad_case_status(c.evaluation_id, "processed")
+                except Exception as exc:
+                    logger.warning(f"Bad Case 状态持久化失败: {exc}")
+            else:
+                try:
+                    from harness.service import get_harness_service
+                    store = get_harness_service().store
+                    for c in pending:
+                        store.update_bad_case_status(
+                            c.evaluation_id,
+                            "retry",
+                            error=result["last_error"],
+                            increment_attempts=True,
+                        )
+                except Exception as exc:
+                    logger.warning(f"Bad Case 重试状态持久化失败: {exc}")
             self.last_tick_result.update(result)
 
         return result

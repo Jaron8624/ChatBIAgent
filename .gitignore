@@ -13,6 +13,7 @@ frontend/dist/
 data/harness/*.db
 data/harness/*.db-*
 data/eval_reports/
+data/*.sqlite
+docker-data/
 backend/evolution/skills/
 *.log
-

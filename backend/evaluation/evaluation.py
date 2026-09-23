@@ -18,7 +18,7 @@ import json
 import uuid
 import logging
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_PROVIDER
@@ -45,6 +45,8 @@ class EvaluationResult:
     passed: bool
     evaluation_id: str
     timestamp: str
+    status: str = "success"
+    error: str = ""
 
 
 class LLMJudge:
@@ -82,7 +84,7 @@ class LLMJudge:
             model_name=os.getenv("SUMMARIZATION_MODEL", "qwen-turbo"),
             temperature=0.0,
         )
-        self.threshold = 6.0  # 及格线
+        self.threshold = float(os.getenv("EVALUATION_PASS_THRESHOLD", "6.0"))
 
     async def evaluate(
         self,
@@ -129,11 +131,15 @@ class LLMJudge:
 
             for k in ("relevance", "accuracy", "completeness", "safety"):
                 parsed[k] = _dim(k)
-            if not parsed.get("overall_score"):
-                parsed["overall_score"] = sum(
-                    parsed[k]["score"] for k in
-                    ("relevance", "accuracy", "completeness", "safety")
-                ) / 4
+                if not 1.0 <= parsed[k]["score"] <= 10.0:
+                    raise ValueError(f"Judge dimension {k} is outside 1-10")
+
+            # Harness owns the release decision. The model only supplies validated
+            # dimension scores; its self-reported `passed` flag is ignored.
+            calculated_overall = sum(
+                parsed[k]["score"] for k in
+                ("relevance", "accuracy", "completeness", "safety")
+            ) / 4
 
             dimensions = [
                 DimensionScore(
@@ -158,8 +164,10 @@ class LLMJudge:
                 ),
             ]
 
-            overall = float(parsed.get("overall_score", 0))
-            passed = parsed.get("passed", overall >= self.threshold)
+            overall = float(calculated_overall)
+            passed = overall >= self.threshold and all(
+                dimension.score >= self.threshold for dimension in dimensions
+            )
 
             return EvaluationResult(
                 query=query,
@@ -170,48 +178,77 @@ class LLMJudge:
                 passed=passed,
                 evaluation_id=str(uuid.uuid4()),
                 timestamp=datetime.now().isoformat(),
+                status="success",
             )
         except Exception as e:
             logger.error(f"LLM-as-Judge 评测失败: {e}")
-            # 返回默认通过结果，避免阻塞主流程
+            # Judge unavailable is an infrastructure error, never a quality pass.
             return EvaluationResult(
                 query=query,
                 response=response,
                 context=context,
                 overall_score=0.0,
                 dimensions=[],
-                passed=True,
+                passed=False,
                 evaluation_id=str(uuid.uuid4()),
                 timestamp=datetime.now().isoformat(),
+                status="infra_error",
+                error=str(e),
             )
 
 
 class BadCaseRepository:
-    """Bad Case 库 — 存储低分评测样本"""
+    """Persistent Bad Case repository shared by evaluation and evolution."""
 
     def __init__(self, max_size: int = 1000):
         self.max_size = max_size
-        self._cases: List[EvaluationResult] = []
+        from harness.store import HarnessStore
+        self.store = HarnessStore()
 
     def add(self, result: EvaluationResult):
-        if not result.passed:
-            self._cases.append(result)
-            if len(self._cases) > self.max_size:
-                self._cases.pop(0)
+        if not result.passed and result.status == "success":
+            self.store.add_bad_case({
+                "evaluation_id": result.evaluation_id,
+                "source": "llm_judge",
+                "query": result.query,
+                "response": result.response,
+                "context": result.context,
+                "overall_score": result.overall_score,
+                "dimensions": [asdict(item) for item in result.dimensions],
+                "evaluation_status": result.status,
+                "processing_status": "new",
+                "created_at": result.timestamp,
+            })
             logger.info(f"Bad Case 已归档: {result.evaluation_id} 评分={result.overall_score}")
 
     def get_cases(
         self, limit: int = 50, min_score: float = 0.0
     ) -> List[EvaluationResult]:
-        filtered = [c for c in self._cases if c.overall_score >= min_score]
-        return sorted(filtered, key=lambda x: x.overall_score)[:limit]
+        rows = self.store.list_bad_cases(
+            limit=min(limit, self.max_size),
+            min_score=min_score,
+            statuses=["new", "retry"],
+        )
+        return [EvaluationResult(
+            query=row["query"],
+            response=row["response"],
+            context=row["context"],
+            overall_score=float(row["overall_score"]),
+            dimensions=[DimensionScore(**item) for item in row["dimensions_json"]],
+            passed=False,
+            evaluation_id=row["bad_case_id"],
+            timestamp=row["created_at"],
+            status=row["evaluation_status"],
+            error=row["last_error"],
+        ) for row in rows]
 
     def get_summary(self) -> Dict[str, Any]:
-        if not self._cases:
+        cases = self.store.list_bad_cases(limit=self.max_size, min_score=0.0)
+        if not cases:
             return {"total": 0, "avg_score": 0.0}
-        scores = [c.overall_score for c in self._cases]
+        scores = [float(c["overall_score"]) for c in cases]
         return {
-            "total": len(self._cases),
+            "total": len(cases),
             "avg_score": round(sum(scores) / len(scores), 2),
             "min_score": round(min(scores), 2),
             "max_score": round(max(scores), 2),

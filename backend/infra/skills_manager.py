@@ -14,12 +14,20 @@ import os
 import json
 import hashlib
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Harness candidates must be tested in the real Agent without becoming globally
+# active. ContextVar keeps the overlay isolated to one async evaluation task.
+_candidate_skill_overlay: ContextVar[tuple] = ContextVar(
+    "candidate_skill_overlay", default=()
+)
 
 SKILLS_DIR = Path(os.getenv("SKILLS_DIR", "./skills"))
 SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -158,6 +166,15 @@ class SkillsManager:
 
     # ==================== 检索与注入 ====================
 
+    @contextmanager
+    def candidate_overlay(self, skills: List[Skill]):
+        """Temporarily inject unpersisted candidate Skills for one request context."""
+        token = _candidate_skill_overlay.set(tuple(skill for skill in skills if skill))
+        try:
+            yield
+        finally:
+            _candidate_skill_overlay.reset(token)
+
     def retrieve_relevant_skills(
         self,
         query: str,
@@ -199,9 +216,16 @@ class SkillsManager:
         这是分层长期上下文的核心能力之一
         """
         skills = self.retrieve_relevant_skills(query, top_k)
-        if not skills:
+        overlays = list(_candidate_skill_overlay.get())
+        if not skills and not overlays:
             return base_prompt
-        skill_context = self.build_skill_context(skills)
+        # Candidate overlays are forced into the prompt. They are deliberately
+        # excluded from persistent usage counters until a Gate promotes them.
+        combined = skills + [
+            item for item in overlays
+            if all(existing.name != item.name for existing in skills)
+        ]
+        skill_context = self.build_skill_context(combined)
         # 更新使用统计
         for skill in skills:
             skill.usage_count += 1
@@ -233,6 +257,32 @@ class SkillsManager:
             [p.stem for p in snapshot_dir.glob(f"{skill_id}_*.json")],
             reverse=True,
         )
+
+    def restore_snapshot(self, snapshot_id: str) -> Optional[str]:
+        """Restore a Skill from an immutable snapshot and return its current ID."""
+        path = SKILLS_DIR / "snapshots" / f"{snapshot_id}.json"
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                restored = Skill.from_dict(json.load(handle))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.error("恢复 Skill 快照失败 %s: %s", snapshot_id, exc)
+            return None
+
+        # update_skill keeps the original dictionary key even when version is
+        # changed. Remove every current version with the same logical name and
+        # restore the exact snapshotted object under its content-derived ID.
+        for current_id, current in list(self._skills.items()):
+            if current.name == restored.name:
+                self._skills.pop(current_id, None)
+                current_path = self._skill_path(current_id)
+                if current_path.exists():
+                    current_path.unlink()
+        self._skills[restored.id] = restored
+        self._save_skill(restored)
+        logger.info("已从快照恢复 Skill: %s <- %s", restored.name, snapshot_id)
+        return restored.id
 
     # ==================== 统计 ====================
 

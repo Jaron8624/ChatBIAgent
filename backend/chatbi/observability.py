@@ -7,6 +7,7 @@
 import json
 import os
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -33,6 +34,20 @@ class TraceStore:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
+    @staticmethod
+    def _redact(value: Any) -> Any:
+        """Best-effort PII and credential redaction before persistence."""
+        if isinstance(value, dict):
+            return {key: TraceStore._redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [TraceStore._redact(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        text = re.sub(r"(?i)sk-[a-z0-9_-]{12,}", "[REDACTED_API_KEY]", value)
+        text = re.sub(r"\b1[3-9]\d{9}\b", "[REDACTED_PHONE]", text)
+        text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", text)
+        return text
+
     def record_trace(self, result: Dict[str, Any], query: str, session_id: str, user_id: Any) -> Dict[str, Any]:
         status = "error" if result.get("error_info") else "ok"
         record = {
@@ -46,8 +61,9 @@ class TraceStore:
             "tool_results": len(result.get("mcp_results", [])), "retry_count": result.get("retry_count", 0),
             "status": status, "error": result.get("error_info", ""),
         }
-        self._append(self.trace_path, record)
-        return record
+        safe_record = self._redact(record)
+        self._append(self.trace_path, safe_record)
+        return safe_record
 
     def should_sample(self, trace: Dict[str, Any]) -> Optional[str]:
         if trace["status"] != "ok":
@@ -60,12 +76,32 @@ class TraceStore:
         return "random_sample" if random.random() < rate else None
 
     def record_online_bad_case(self, trace: Dict[str, Any], reason: str, feedback: Optional[bool] = None) -> None:
-        self._append(self.badcase_path, {
+        payload = self._redact({
             "trace_id": trace.get("trace_id", ""), "session_id": trace.get("session_id", ""),
             "query": trace.get("query", ""), "response": trace.get("response", ""),
             "reason": reason, "feedback": feedback, "status": "new",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
+        self._append(self.badcase_path, payload)
+        try:
+            from harness.service import get_harness_service
+            get_harness_service().store.add_bad_case({
+                "bad_case_id": payload.get("trace_id") or None,
+                "source": f"online:{reason}",
+                "query": payload.get("query", ""),
+                "response": payload.get("response", ""),
+                "context": "",
+                "overall_score": 0.0,
+                "dimensions": [],
+                "evaluation_status": "success",
+                # Random traffic is a review sample, not automatically a
+                # quality failure. Only errors/slow/retry traces enter the Bad
+                # Case evolution queue immediately.
+                "processing_status": "needs_evaluation" if reason == "random_sample" else "new",
+                "created_at": payload.get("timestamp"),
+            })
+        except Exception as exc:
+            logger.warning(f"线上 Bad Case 写入 Harness 失败: {exc}")
 
 
 async def archive_and_sample(result: Dict[str, Any], query: str, session_id: str, user_id: Any) -> None:
