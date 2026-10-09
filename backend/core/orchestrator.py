@@ -1748,30 +1748,21 @@ class Orchestrator:
                     )
 
         # ===== 跨 Session 记忆连续性：注入用户长期记忆 =====
-        if snapshot and snapshot.messages:
+        if user_id > 0:
             try:
-                from infra.schemas import ContextSchema
-                from tools.tools import get_memory
-                mem_result = await _invoke_raw_tool(
-                    get_memory,
-                    query="用户偏好、技术栈、历史关注话题",
-                    semantic_k=3,
-                    episodic_k=1,
-                    procedural_k=1,
-                    runtime=_make_runtime(ContextSchema(
-                        user_id=user_id,
-                        knowledge_base_id=knowledge_base_id,
-                        top_k=5,
-                        tenant_id=tenant_id,
-                        session_id=resumed_sid,
-                    )),
+                from memory.context_loader import load_memory_context
+                from rag.milvus_client import get_milvus_client
+                memory_client = await get_milvus_client()
+                mem_result = await load_memory_context(
+                    memory_client.memory_manager, query, user_id, tenant_id,
+                    token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")),
                 )
-                if mem_result and len(mem_result) > 20:
+                if mem_result:
                     # 把记忆作为 system context 注入到 messages 开头
                     memory_msg = {
                         "role": "system",
                         "context_kind": "long_term_memory",
-                        "content": f"【用户背景记忆】{mem_result[:800]}",
+                        "content": mem_result,
                     }
                     # 插入到所有 system 消息之后、user/assistant 消息之前
                     sys_count = sum(1 for m in messages if m.get("role") == "system")

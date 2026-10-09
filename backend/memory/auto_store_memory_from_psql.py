@@ -201,6 +201,11 @@ async def extract_and_append_memory(
         async with memory_write_lock(pg_client.pool, user_id, tenant_id) as conn:
             ledger = IngestionLedger(conn)
             await ledger.ensure_schema()
+            from memory.management import MutationJournal
+            milvus = await get_milvus_client()
+            journal = MutationJournal(conn, getattr(milvus, "memory_manager", milvus))
+            await journal.ensure_schema()
+            await journal.replay_pending(user_id, tenant_id)
             if not await ledger.active(user_id, tenant_id, thread_id):
                 await ledger.cancel_session(user_id, tenant_id, thread_id)
                 return {"success": False, "reason": "会话已删除或归属不匹配"}

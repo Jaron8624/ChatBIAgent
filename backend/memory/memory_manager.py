@@ -212,7 +212,7 @@ class MemoryManager:
 
         dense_vector = await self.get_dense_vector(query)
         if not dense_vector:
-            return {}
+            return await self.lexical_retrieval_memories(query, memory_configs)
 
         async def search_memory_type(memory_type: str, config: dict):
             k = config["k"]
@@ -436,9 +436,15 @@ class MemoryManager:
                 if key and mem.get("id") != latest[key][1]:
                     continue
                 semantic_score = float(mem.get("score", 0))
-                if not math.isfinite(semantic_score) or semantic_score < minimum:
+                if not math.isfinite(semantic_score):
                     continue
-                if mem.get("score_kind", "cosine") != "cosine":
+                score_kind = mem.get("score_kind", "cosine")
+                if score_kind == "bm25":
+                    if semantic_score <= 0:
+                        continue
+                    # Only a bounded ranking signal, NOT a calibrated cosine.
+                    semantic_score = semantic_score / (1 + semantic_score)
+                elif score_kind != "cosine" or semantic_score < minimum:
                     continue
                 fresh_at = mem.get("updated_at") or mem.get("created_at") or 0
                 hours_passed = max(0, (current_time - float(fresh_at)) / 3600)
@@ -466,6 +472,8 @@ class MemoryManager:
                     "last_access_at": mem.get("last_access_at"),
                     "summary_id": mem.get("summary_id"),
                     "relevance": mem.get("score"),
+                    "score_kind": mem.get("score_kind", "cosine"),
+                    "version": mem.get("version", 1),
                     "memory_key": mem.get("memory_key", ""),
                     "source_message_ids": mem.get("source_message_ids", []),
                     "evidence_kind": mem.get("evidence_kind", "legacy"),
@@ -474,6 +482,79 @@ class MemoryManager:
             ]
 
         return result
+
+    async def lexical_retrieval_memories(self, query, memory_configs):
+        """Embedding-independent BM25; retain explicit score semantics."""
+        async def search(kind, config):
+            try:
+                hits = await self.client.search(
+                    collection_name=self.collection_name, data=[query],
+                    anns_field="sparse_vector", search_params={"metric_type": "BM25"},
+                    limit=config["k"] * 6, filter=config["filter"],
+                    output_fields=["*"], consistency_level="Strong",
+                )
+                return kind, [dict(hit["entity"], score=hit["distance"], score_kind="bm25")
+                              for hit in (hits[0] if hits else [])]
+            except Exception:
+                logger.warning("BM25 memory retrieval unavailable for %s", kind, exc_info=True)
+                return kind, []
+        rows = dict(await asyncio.gather(*(search(k, v) for k, v in memory_configs.items())))
+        return self.get_the_top_k_memories(rows, memory_configs=memory_configs)
+
+    async def list_active_memories(self, user_id, tenant_id="default", limit=50, offset=0):
+        """Management reads never expose vectors or another identity's records."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit必须在1到100之间")
+        if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= 10000:
+            raise ValueError("offset必须在0到10000之间")
+        scope = memory_scope_user_id(user_id, tenant_id)
+        return await self.client.query(
+            collection_name=self.collection_name,
+            filter=f'user_id == {scope} and (not exists status or status == "active")',
+            output_fields=["id", "memory_type", "content", "memory_key", "version",
+                           "thread_id", "created_at", "source_message_ids", "evidence_kind"],
+            limit=limit, offset=offset, consistency_level="Strong",
+        )
+
+    async def get_owned_memory(self, memory_id, user_id, tenant_id="default"):
+        if isinstance(memory_id, bool) or not str(memory_id).isdigit() or int(memory_id) <= 0:
+            raise ValueError("记忆ID无效")
+        scope = memory_scope_user_id(user_id, tenant_id)
+        rows = await self.client.query(
+            collection_name=self.collection_name,
+            filter=f'user_id == {scope} and id == {int(memory_id)} and (not exists status or status == "active")',
+            output_fields=["id", "memory_type", "content", "memory_key", "version", "thread_id",
+                           "created_at", "source_message_ids", "evidence_kind"],
+            limit=1, consistency_level="Strong",
+        )
+        return rows[0] if rows else None
+
+    async def get_stable_preferences(self, user_id, tenant_id="default", limit=5):
+        """Read explicit stable preferences without an embedding or generic query."""
+        if not 1 <= limit <= 20:
+            raise ValueError("偏好数量必须在1到20之间")
+        scope = memory_scope_user_id(user_id, tenant_id)
+        ttl = max(0, int(os.getenv("LONG_TERM_MEMORY_TTL_DAYS", "0")))
+        expiry = f" and created_at >= {int(time.time()) - ttl * 86400}" if ttl else ""
+        rows = await self.client.query(
+            collection_name=self.collection_name,
+            filter=f'user_id == {scope} and memory_type == "semantic" and status == "active"'
+                   ' and memory_key like "preference.%" and evidence_kind == "user_quote"' + expiry,
+            output_fields=["id", "content", "memory_key", "version", "updated_at",
+                           "source_message_ids", "evidence_kind"],
+            limit=1000, consistency_level="Strong",
+        )
+        if len(rows) >= 1000:
+            raise RuntimeError("memory_preference_inventory_limit")
+        latest = {}
+        for row in rows:
+            key = row.get("memory_key", "")
+            if not key.startswith("preference.") or row.get("evidence_kind") != "user_quote":
+                continue
+            rank = (int(row.get("version", 1)), row.get("updated_at", 0) or 0)
+            if key not in latest or rank > latest[key][0]:
+                latest[key] = (rank, row)
+        return [entry[1] for entry in sorted(latest.values(), key=lambda x: (x[0], x[1]["memory_key"]), reverse=True)[:limit]]
 
     async def get_memory_attribute_keys(self, user_id: int, tenant_id: str = "default") -> list:
         """Supply scoped attribute names so extraction does not rename an existing fact."""

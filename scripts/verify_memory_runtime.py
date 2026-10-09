@@ -33,6 +33,8 @@ from infra.llm_usage import UsageTracker
 from memory import auto_store_memory_from_psql as ingestion
 from memory.ingestion_ledger import IngestionLedger, memory_write_lock
 from memory.memory_manager import MemoryManager, memory_scope_user_id
+from memory.management import edit_memory, MemoryConflict
+from memory.context_loader import HEADER, load_memory_context
 from memory.policy import cosine
 from memory.session_recovery import SessionManager
 from rag.embedding_provider import get_embeddings
@@ -66,7 +68,8 @@ def manifest():
     files = ['backend/memory/memory_manager.py', 'backend/memory/policy.py',
              'backend/memory/ingestion_ledger.py', 'backend/memory/auto_store_memory_from_psql.py',
              'backend/memory/session_recovery.py', 'scripts/verify_memory_runtime.py']
-    files += ['backend/rag/embedding_provider.py', 'backend/infra/config.py']
+    files += ['backend/rag/embedding_provider.py', 'backend/infra/config.py',
+              'backend/memory/context_loader.py', 'backend/memory/management.py']
     return {
         'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
         'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
@@ -227,6 +230,7 @@ async def main():
             await retirement_retry(manager, client, check)
 
             await retrieval_ablation(manager, embeddings, report, check)
+            await managed_memory_checks(pg, manager, client, check)
         report['model_usage'] = tracker.snapshot()
         if not report['model_usage']['cost_complete']:
             report['model_usage']['estimated_cost'] = None
@@ -359,6 +363,59 @@ async def retrieval_ablation(manager, embeddings, report, check):
         'holdout_negative_correct':sum(predict(s,selected) is None for s in holdout if s['expected'] is None),
         'holdout_negative_count':sum(s['expected'] is None for s in holdout),
     }
+
+
+async def managed_memory_checks(pg, manager, client, check):
+    uid, tenant, thread = 910005, 'memory-management', 'manage_' + uuid.uuid4().hex[:12]
+    await pg.register_session_owner(thread, uid, tenant)
+    facts = {'semantic_memory': [dict(content='用户的报告使用中文。', memory_key='preference.language',
+                                      evidence_kind='user_quote', importance_score=.8)]}
+    await manager.add_memories_batch(uid, thread, facts, batch_id='fixture', tenant_id=tenant)
+    rows = await manager.get_stable_preferences(uid, tenant)
+    check('stable_preferences_without_generic_query', len(rows)==1 and rows[0]['content']=='用户的报告使用中文。')
+    rid = rows[0]['id']
+    check('managed_read_user_and_tenant_isolation',
+          await manager.get_owned_memory(rid, uid+1, tenant) is None
+          and await manager.get_owned_memory(rid, uid, 'other') is None)
+    context = await load_memory_context(manager, '报告语言', uid, tenant)
+    check('whole_record_context_loader', bool(context) and json.loads(context[len(HEADER):])[0]['id']==str(rid))
+    with patch.object(manager, 'get_dense_vector', return_value=[]):
+        lexical = await manager.hybrid_retrieval_memories('报告 中文', uid, 0, 3, 0, 0, tenant)
+    check('real_bm25_without_embedding', bool(lexical.get('semantic'))
+          and all(r['score_kind']=='bm25' for r in lexical['semantic']))
+    try:
+        await edit_memory(pg, manager, uid, tenant, str(uuid.uuid4()), 'correct', rid, 99, '用户的报告使用英文。')
+    except MemoryConflict:
+        check('manual_edit_optimistic_version_conflict', True)
+    else:
+        check('manual_edit_optimistic_version_conflict', False)
+    op = str(uuid.uuid4())
+    actual_write = manager.add_memories_batch
+    async def interrupted(*args, **kwargs):
+        await actual_write(*args, **kwargs)
+        raise RuntimeError('injected_after_manual_vector_write')
+    with patch.object(manager, 'add_memories_batch', interrupted):
+        try:
+            await edit_memory(pg, manager, uid, tenant, op, 'correct', rid, 1, '用户的报告使用英文。')
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('manual_fault_not_injected')
+    async with pg.pool.acquire() as conn:
+        status = await conn.fetchval('SELECT status FROM nexusmind_memory_mutations WHERE operation_id=$1', op)
+    check('manual_edit_durable_pending_after_interruption', status=='prepared')
+    result = await edit_memory(pg, manager, uid, tenant, op, 'correct', rid, 1, '用户的报告使用英文。')
+    latest = await manager.get_stable_preferences(uid, tenant)
+    check('manual_edit_replay_latest_version', result['replayed'] and len(latest)==1
+          and latest[0]['version']==2 and latest[0]['content']=='用户的报告使用英文。')
+    replay = await edit_memory(pg, manager, uid, tenant, op, 'correct', rid, 1, '用户的报告使用英文。')
+    check('completed_manual_edit_is_idempotent', replay['replayed'])
+    delete_op = str(uuid.uuid4())
+    await edit_memory(pg, manager, uid, tenant, delete_op, 'forget', latest[0]['id'], 2)
+    remaining = await client.query(collection_name=manager.collection_name,
+                filter=f'user_id == {memory_scope_user_id(uid, tenant)}',
+                output_fields=['id'], limit=100, consistency_level='Strong')
+    check('forget_all_versions_no_old_preference_resurrection', not remaining)
 
 
 async def retirement_retry(manager, client, check):

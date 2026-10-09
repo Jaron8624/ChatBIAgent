@@ -1708,6 +1708,69 @@ async def rollback_evolution_rule(
 
 # ==================== 新增：会话恢复（Session）接口 ====================
 
+async def require_memory_identity(request: Request):
+    identity = await require_permission(Permission.CHAT)(request)
+    if identity["user_id"] <= 0:
+        raise HTTPException(status_code=401, detail="管理个人记忆需要登录")
+    return identity
+
+
+@router.get("/memory")
+async def list_memories(limit: int = 50, offset: int = 0,
+                        user_info: dict = Depends(require_memory_identity)):
+    from rag.milvus_client import get_milvus_client
+    client = await get_milvus_client()
+    try:
+        rows = await client.memory_manager.list_active_memories(
+            user_info["user_id"], user_info["tenant_id"], limit, offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "memories": rows}
+
+
+@router.get("/memory/{memory_id}")
+async def read_memory(memory_id: int,
+                      user_info: dict = Depends(require_memory_identity)):
+    from rag.milvus_client import get_milvus_client
+    client = await get_milvus_client()
+    try:
+        row = await client.memory_manager.get_owned_memory(memory_id, user_info["user_id"], user_info["tenant_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not row:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"success": True, "memory": row}
+
+
+@router.post("/memory/{memory_id}/edit")
+async def manage_memory(memory_id: int, request: Request,
+                        user_info: dict = Depends(require_memory_identity)):
+    from memory.management import edit_memory, MemoryConflict
+    from rag.milvus_client import get_milvus_client
+    from infra.postgresql_client import get_postgresql_client as get_pg
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是JSON对象")
+        client, pg = await get_milvus_client(), await get_pg()
+        result = await edit_memory(
+            pg, client.memory_manager, user_info["user_id"], user_info["tenant_id"],
+            body.get("operation_id"), body.get("action"), memory_id,
+            body.get("expected_version"), body.get("content", ""),
+        )
+        return {"success": True, **result}
+    except MemoryConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        code = 409 if str(exc) == "memory_scope_busy" else 503
+        raise HTTPException(status_code=code, detail="记忆操作暂不可用，请用相同operation_id重试")
+
+
 @router.get("/session/list")
 async def list_sessions(
     limit: int = 20,

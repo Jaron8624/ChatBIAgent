@@ -1,0 +1,221 @@
+{
+  "run_id": "20261009T151125Z_aa2d6e",
+  "status": "passed",
+  "base_commit": "ec384d4b741b1d364d4f2789bfeb184ba60e9524",
+  "source_hashes": {
+    "backend/memory/memory_manager.py": "e867ef314a2563cf2364200912be35fc2ae105b3856cde2c903bfa09a7f8b2e0",
+    "backend/memory/policy.py": "74129bfcf495b3bb4f1809012133027e080dc49546fe7106a8da0f8363fb7673",
+    "backend/memory/ingestion_ledger.py": "f67f02a602cd84f7761af9ea121bd674c65a301af4e02efbef803bd801e8fc7d",
+    "backend/memory/auto_store_memory_from_psql.py": "54a650deebab3fd6112ad1aad594884574144ce810f9b22b2b9da6d213114e50",
+    "backend/memory/session_recovery.py": "2bfb823b2601f1a9ebc6d7f2af215603c80c8ef6d403a3599a5ee6a1795bf706",
+    "scripts/verify_memory_runtime.py": "e1c834d5c9a30d07466b6926d5c89a9be5c09e21ae04677c593f841350311bcf",
+    "backend/rag/embedding_provider.py": "8edd93e5759ca2e97ba957d27d7d3ee8ccba343e773d552657a7c6cf54cc75a6",
+    "backend/infra/config.py": "e4b7f9f9959892251f954c02518aa0caaa6f8da5417551b11baecc612cf76091",
+    "backend/memory/context_loader.py": "f94497f6a0bdd995e1e00ae542a45d87745f8e43f6906fa9f7a98699e83dd704",
+    "backend/memory/management.py": "32b71aa3aeb8bb5df9dde373dbb842b1028739290930194a5fd3bd6df1aa28e8"
+  },
+  "models": {
+    "chat": "deepseek-chat",
+    "embedding": "text-embedding-v4"
+  },
+  "real_service_checks": [
+    {
+      "name": "real_embedding_endpoint",
+      "passed": true,
+      "dimension": 1024
+    },
+    {
+      "name": "postgres_isolated_schema",
+      "passed": true
+    },
+    {
+      "name": "milvus_real_schema_and_indexes",
+      "passed": true
+    },
+    {
+      "name": "real_model_extraction_and_commit",
+      "passed": true,
+      "result": {
+        "success": true,
+        "batch_id": "276636e4112b97773150aba8c419d7e69bfc18dcca59873457416d81d0af6812",
+        "summary_id": "f5274413-97ea-5b6c-84a3-986a6d3f667e",
+        "token_count": 17,
+        "message_count": 2,
+        "updated_message_count": 2
+      }
+    },
+    {
+      "name": "real_model_preference_update",
+      "passed": true,
+      "result": {
+        "success": true,
+        "batch_id": "e8a3a33571f53b4f22c3bc3ce4d0f42ccf6c4a6c79874471db550587706aaaf7",
+        "summary_id": "84c8a564-9062-5f6a-8a99-b92627983ce4",
+        "token_count": 18,
+        "message_count": 2,
+        "updated_message_count": 2
+      }
+    },
+    {
+      "name": "model_keys_replace_old_preference",
+      "passed": true,
+      "retired_count": 1,
+      "active_keys": [
+        "",
+        "preference.report_currency",
+        "preference.report_language",
+        "",
+        "",
+        "preference.report_period",
+        ""
+      ]
+    },
+    {
+      "name": "failure_keeps_sources_and_frozen_batch",
+      "passed": true
+    },
+    {
+      "name": "fresh_worker_replay_no_duplicate_vectors",
+      "passed": true,
+      "vector_count": 3
+    },
+    {
+      "name": "real_postgres_concurrent_writer_rejected",
+      "passed": true
+    },
+    {
+      "name": "real_session_delete_removes_raw_vectors_batch_payload",
+      "passed": true
+    },
+    {
+      "name": "deleted_session_cannot_be_recreated_by_worker",
+      "passed": true
+    },
+    {
+      "name": "real_tenant_filter",
+      "passed": true
+    },
+    {
+      "name": "retirement_retry_resolves_current_physical_ids",
+      "passed": true
+    },
+    {
+      "name": "retirement_retry_keeps_one_active_version",
+      "passed": true
+    },
+    {
+      "name": "real_retrieval_ablation_completed",
+      "passed": true
+    },
+    {
+      "name": "retrieval_is_read_only_and_keeps_physical_ids",
+      "passed": true
+    },
+    {
+      "name": "stable_preferences_without_generic_query",
+      "passed": true
+    },
+    {
+      "name": "managed_read_user_and_tenant_isolation",
+      "passed": true
+    },
+    {
+      "name": "whole_record_context_loader",
+      "passed": true
+    },
+    {
+      "name": "real_bm25_without_embedding",
+      "passed": true
+    },
+    {
+      "name": "manual_edit_optimistic_version_conflict",
+      "passed": true
+    },
+    {
+      "name": "manual_edit_durable_pending_after_interruption",
+      "passed": true
+    },
+    {
+      "name": "manual_edit_replay_latest_version",
+      "passed": true
+    },
+    {
+      "name": "completed_manual_edit_is_idempotent",
+      "passed": true
+    },
+    {
+      "name": "forget_all_versions_no_old_preference_resurrection",
+      "passed": true
+    }
+  ],
+  "ablation_summary": {
+    "legacy_rrf_scoring": {
+      "samples": 28,
+      "correct": 20,
+      "positive_top1": 1,
+      "irrelevant_rejection": 0,
+      "overall": 0.7142857142857143
+    },
+    "cosine_no_threshold": {
+      "samples": 28,
+      "correct": 20,
+      "positive_top1": 1,
+      "irrelevant_rejection": 0,
+      "overall": 0.7142857142857143
+    },
+    "current_threshold_035": {
+      "samples": 28,
+      "correct": 26,
+      "positive_top1": 1,
+      "irrelevant_rejection": 0.75,
+      "overall": 0.9285714285714286
+    },
+    "optimized_threshold_040": {
+      "samples": 28,
+      "correct": 28,
+      "positive_top1": 1,
+      "irrelevant_rejection": 1,
+      "overall": 1
+    },
+    "dense_only_035": {
+      "samples": 28,
+      "correct": 26,
+      "positive_top1": 1,
+      "irrelevant_rejection": 0.75,
+      "overall": 0.9285714285714286
+    }
+  },
+  "threshold_calibration": {
+    "split": "even-index calibration; odd-index holdout; fixed before selecting threshold",
+    "calibration_samples": 14,
+    "holdout_samples": 14,
+    "selected_threshold": 0.4,
+    "grid_scores": {
+      "0.35": 12,
+      "0.4": 14,
+      "0.45": 14,
+      "0.5": 14,
+      "0.55": 14,
+      "0.6": 14
+    },
+    "holdout_correct": 14,
+    "holdout_at_035_correct": 14,
+    "holdout_positive_correct": 10,
+    "holdout_positive_count": 10,
+    "holdout_negative_correct": 4,
+    "holdout_negative_count": 4
+  },
+  "local_regression": {
+    "memory": 35,
+    "session": 5,
+    "context_safety": 8,
+    "graph_checkpointer": 4,
+    "access_control": 3
+  },
+  "evidence_scope": "Synthetic isolated fixtures, real configured model/embedding APIs and local PostgreSQL/Milvus/Redis. HTTP routes tested in an isolated FastAPI app with storage doubles. Not a full production traffic evaluation.",
+  "claude_references": [
+    "https://code.claude.com/docs/en/memory",
+    "https://github.com/anthropics/claude-agent-sdk-python/tree/a8e7ce3cf2d7b18f815f55d5ef3b770d8bfe9cd9"
+  ],
+  "full_local_report": "artifacts/memory_runtime/20261009T151125Z_aa2d6e/report.json"
+}
