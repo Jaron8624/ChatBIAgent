@@ -62,8 +62,18 @@ class AsyncMilvusClientWrapper:
         if self._singleton_initialized:
             return
 
-        self.knowledge_base_collection = os.getenv("knowledge_base_collection")
-        self.memory_collection = os.getenv("memory_collection")
+        # Keep local and container deployments deterministic even when the
+        # legacy lower-case collection variables are omitted.
+        self.knowledge_base_collection = (
+            os.getenv("knowledge_base_collection")
+            or os.getenv("MILVUS_KNOWLEDGE_COLLECTION")
+            or "nexusmind_knowledge"
+        )
+        self.memory_collection = (
+            os.getenv("memory_collection")
+            or os.getenv("MILVUS_MEMORY_COLLECTION")
+            or "nexusmind_memory"
+        )
 
         self.embeddings = get_embeddings()
         self.client = AsyncMilvusClient(
@@ -125,6 +135,7 @@ class AsyncMilvusClientWrapper:
         semantic_k: int,
         episodic_k: int,
         procedural_k: int,
+        tenant_id: str = "default",
     ):
         """混合检索记忆 - 代理到 memory_manager"""
         return await self.memory_manager.hybrid_retrieval_memories(
@@ -134,11 +145,26 @@ class AsyncMilvusClientWrapper:
             semantic_k=semantic_k,
             episodic_k=episodic_k,
             procedural_k=procedural_k,
+            tenant_id=tenant_id,
         )
 
-    async def resolve_conflicts(self, filtered_memory: dict, user_id: int) -> dict:
+    async def get_memory_attribute_keys(self, user_id: int, tenant_id: str = "default"):
+        return await self.memory_manager.get_memory_attribute_keys(user_id, tenant_id)
+
+    async def resolve_conflicts(
+        self, filtered_memory: dict, user_id: int, tenant_id: str = "default"
+    ) -> dict:
         """检测并过滤重复记忆 - 代理到 memory_manager"""
-        return await self.memory_manager.resolve_conflicts(filtered_memory, user_id)
+        return await self.memory_manager.resolve_conflicts(
+            filtered_memory, user_id, tenant_id
+        )
+
+    async def delete_session_memories(
+        self, user_id: int, tenant_id: str, thread_id: str
+    ) -> int:
+        return await self.memory_manager.delete_session_memories(
+            user_id, tenant_id, thread_id
+        )
 
     async def add_memories_batch(
         self,

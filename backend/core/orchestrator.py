@@ -19,12 +19,12 @@ import json
 import time
 import asyncio
 import logging
+import uuid
 from typing import Dict, List, Any, Optional, TypedDict, Annotated
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留导入，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 import operator
 
 from core.intent_recognition import IntentRecognizer
@@ -32,7 +32,7 @@ from tools.mcp_protocol import MCPToolServer, MCPToolRouter
 from evaluation.monitor import Monitor
 from core.react_agent import ReActAgent
 from core import collaboration
-from infra.tracing import Tracer
+from infra.tracing import Tracer, export_otel_trace
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -42,6 +42,7 @@ class AgentState(TypedDict):
     """多 Agent 编排的状态"""
     messages: Annotated[List[Dict[str, Any]], operator.add]
     user_id: int
+    tenant_id: str
     session_id: str
     intent: str
     intent_confidence: float
@@ -50,6 +51,7 @@ class AgentState(TypedDict):
     rag_result: Optional[str]
     memory_result: Optional[str]
     mcp_results: List[str]
+    tool_events: List[Dict[str, Any]]
     explore_result: Optional[str]    # ExploreAgent 广泛检索结果
     plan_steps: List[str]            # PlanAgent 拆解的子任务
     plan_mode: bool                  # 是否启用显式规划模式
@@ -120,6 +122,8 @@ class RAGAgent:
                     user_id=user_id,
                     knowledge_base_id=knowledge_base_id,
                     top_k=5,
+                    tenant_id=state.get("tenant_id", "default"),
+                    session_id=state.get("session_id", ""),
                 )),
             )
             return {"rag_result": result}
@@ -158,6 +162,8 @@ class MemoryAgent:
                     user_id=user_id,
                     knowledge_base_id="默认知识库",
                     top_k=5,
+                    tenant_id=state.get("tenant_id", "default"),
+                    session_id=state.get("session_id", ""),
                 )),
             )
             return {"memory_result": result}
@@ -197,6 +203,8 @@ class ExploreAgent:
                     user_id=user_id,
                     knowledge_base_id=knowledge_base_id,
                     top_k=10,
+                    tenant_id=state.get("tenant_id", "default"),
+                    session_id=state.get("session_id", ""),
                 )),
             )
             if kb and kb != "未检索到相关文档":
@@ -216,6 +224,8 @@ class ExploreAgent:
                     user_id=user_id,
                     knowledge_base_id="默认知识库",
                     top_k=5,
+                    tenant_id=state.get("tenant_id", "default"),
+                    session_id=state.get("session_id", ""),
                 )),
             )
             if mem:
@@ -390,6 +400,7 @@ class Orchestrator:
         async def _kb_search_handler(
             query: str,
             user_id: int = 0,
+            tenant_id: str = "default",
             knowledge_base_id: str = "默认知识库",
             top_k: int = 5,
         ) -> str:
@@ -399,6 +410,7 @@ class Orchestrator:
                 query=query,
                 runtime=_make_runtime(ContextSchema(
                     user_id=user_id,
+                    tenant_id=tenant_id,
                     knowledge_base_id=knowledge_base_id,
                     top_k=top_k,
                 )),
@@ -407,6 +419,7 @@ class Orchestrator:
         async def _memory_handler(
             query: str,
             user_id: int = 0,
+            tenant_id: str = "default",
             semantic_k: int = 3,
             episodic_k: int = 2,
             procedural_k: int = 1,
@@ -420,6 +433,7 @@ class Orchestrator:
                 procedural_k=procedural_k,
                 runtime=_make_runtime(ContextSchema(
                     user_id=user_id,
+                    tenant_id=tenant_id,
                     knowledge_base_id="默认知识库",
                     top_k=5,
                 )),
@@ -435,6 +449,7 @@ class Orchestrator:
                 "properties": {
                     "query": {"type": "string", "description": "搜索查询词"},
                     "user_id": {"type": "integer", "description": "用户ID", "default": 0},
+                    "tenant_id": {"type": "string", "description": "租户标识"},
                     "knowledge_base_id": {"type": "string", "description": "知识库ID", "default": "默认知识库"},
                     "top_k": {"type": "integer", "description": "返回文档数", "default": 5},
                 },
@@ -451,6 +466,7 @@ class Orchestrator:
                 "properties": {
                     "query": {"type": "string", "description": "记忆查询词"},
                     "user_id": {"type": "integer", "description": "用户ID", "default": 0},
+                    "tenant_id": {"type": "string", "description": "租户标识"},
                     "semantic_k": {"type": "integer", "description": "语义记忆召回数量", "default": 3},
                     "episodic_k": {"type": "integer", "description": "情节记忆召回数量", "default": 2},
                     "procedural_k": {"type": "integer", "description": "程序记忆召回数量", "default": 1},
@@ -537,7 +553,7 @@ class Orchestrator:
             payload["error"] = error
         await self._emit(sid, "node_complete", payload)
 
-    def _build_graph(self):
+    def _build_graph(self, checkpointer=None):
         """构建 LangGraph 编排图"""
         workflow = StateGraph(AgentState)
 
@@ -619,7 +635,186 @@ class Orchestrator:
             },
         )
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=checkpointer)
+
+    def _get_graph(self):
+        """Compile the graph once, using the app's configured durable saver."""
+        if self._graph is None:
+            from infra.graph_checkpointer import get_graph_checkpointer_manager
+            manager = get_graph_checkpointer_manager()
+            self._graph = self._build_graph(
+                checkpointer=manager.saver if manager.saver is not None else None
+            )
+        return self._graph
+
+    @staticmethod
+    async def _save_completed_session_turn(
+        session_mgr,
+        *,
+        session_id: str,
+        user_id: int,
+        tenant_id: str,
+        messages: List[Dict[str, Any]],
+        query: str,
+        answer: str,
+        run_id: str,
+        token_count: int = 0,
+    ) -> bool:
+        """Persist the visible transcript and idempotent memory-ingestion source."""
+        visible_messages = [
+            dict(message) for message in messages
+            if message.get("context_kind") != "long_term_memory"
+        ]
+        if not visible_messages or visible_messages[-1].get("role") != "user" or visible_messages[-1].get("content") != query:
+            visible_messages.append({"role": "user", "content": query})
+        if not visible_messages or visible_messages[-1].get("role") != "assistant" or visible_messages[-1].get("content") != answer:
+            visible_messages.append({"role": "assistant", "content": answer})
+
+        saved = await session_mgr.save_session(
+            session_id=session_id,
+            user_id=user_id,
+            messages=visible_messages,
+            state={"run_status": "completed", "last_run_id": run_id},
+            summary=answer[:200],
+            token_count=token_count,
+            tenant_id=tenant_id,
+        )
+        if not saved:
+            return False
+
+        if await session_mgr.is_session_deleted(session_id, user_id, tenant_id):
+            return False
+
+        if user_id > 0 and os.getenv("LONG_TERM_MEMORY_INGEST_ENABLED", "true").lower() in {"1", "true", "yes"}:
+            try:
+                from infra.postgresql_client import get_postgresql_client
+                pg_client = await get_postgresql_client()
+                await pg_client.add_conversation_turn(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    thread_id=session_id,
+                    turn_id=run_id,
+                    query=query,
+                    answer=answer,
+                )
+                # If deletion began while the insert was in flight, finish by
+                # removing these rows as well. The write is idempotent by run_id.
+                if await session_mgr.is_session_deleted(session_id, user_id, tenant_id):
+                    await pg_client.delete_conversation_thread(user_id, tenant_id, session_id)
+            except Exception as exc:
+                # Chat completion remains available; ingestion failures are visible
+                # in logs and can be retried by a later application-level job.
+                logger.exception("长期记忆原始对话写入失败，run_id=%s: %s", run_id, exc)
+        return True
+
+    async def execution_status(self, session_id: str, user_id: int, tenant_id: str):
+        """Return owner-scoped session and graph recovery status."""
+        from memory.session_recovery import get_session_manager
+        session_mgr = await get_session_manager()
+        snapshot = await session_mgr.resume_session(session_id, user_id, tenant_id)
+        if snapshot is None:
+            return None
+        state = snapshot.state or {}
+        status = state.get("run_status", "idle")
+        response = {
+            "session_id": snapshot.session_id,
+            "status": status,
+            "recoverable": bool(state.get("recoverable")),
+            "updated_at": snapshot.updated_at,
+        }
+        run_id = state.get("active_run_id")
+        if status not in {"running", "interrupted"} or not run_id:
+            return response
+        from infra.graph_checkpointer import get_graph_checkpointer_manager, checkpoint_thread_id
+        manager = get_graph_checkpointer_manager()
+        if manager.saver is None:
+            response["recoverable"] = False
+            return response
+        thread_id = checkpoint_thread_id(session_id, user_id, tenant_id)
+        try:
+            checkpoint = await manager.thread_snapshot(thread_id, str(run_id))
+            response["next_nodes"] = list(checkpoint.next or ())
+            response["recoverable"] = bool(checkpoint.next or checkpoint.values)
+        except Exception as exc:
+            logger.warning("读取图执行状态失败: %s", exc)
+            response["recoverable"] = False
+        return response
+
+    async def recover_session(self, session_id: str, user_id: int, tenant_id: str):
+        """Resume the latest incomplete graph run from its last durable checkpoint."""
+        from memory.session_recovery import get_session_manager
+        from infra.graph_checkpointer import (
+            GraphCheckpointBusy,
+            checkpoint_thread_id,
+            get_graph_checkpointer_manager,
+        )
+
+        session_mgr = await get_session_manager()
+        session = await session_mgr.resume_session(session_id, user_id, tenant_id)
+        if session is None:
+            raise KeyError("会话不存在或已过期")
+        run_state = session.state or {}
+        run_id = str(run_state.get("active_run_id") or "")
+        if run_state.get("run_status") not in {"running", "interrupted"} or not run_id:
+            raise ValueError("该会话没有可恢复的未完成执行")
+
+        manager = get_graph_checkpointer_manager()
+        if manager.saver is None or not run_state.get("recoverable"):
+            raise RuntimeError("图检查点未启用或没有可用检查点，无法恢复")
+
+        thread_id = checkpoint_thread_id(session_id, user_id, tenant_id)
+        graph = self._get_graph()
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": run_id,
+            }
+        }
+        query = str(run_state.get("active_query") or "")
+        if not query:
+            raise ValueError("会话缺少待恢复的用户问题")
+
+        try:
+            async with manager.session_lock(thread_id):
+                checkpoint = await graph.aget_state(config)
+                if checkpoint.next:
+                    from core.context_store import context_identity
+                    with context_identity(user_id, tenant_id, session_id):
+                        result = await graph.ainvoke(None, config, durability="sync")
+                else:
+                    result = dict(checkpoint.values or {})
+                answer = str(result.get("final_response") or "")
+                if not answer:
+                    raise RuntimeError("检查点中没有可返回的最终答案")
+        except BaseException:
+            try:
+                await asyncio.shield(session_mgr.save_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    messages=session.messages,
+                    state={**run_state, "run_status": "interrupted"},
+                    summary=session.summary,
+                    token_count=session.token_count,
+                    tenant_id=tenant_id,
+                ))
+            except Exception:
+                logger.exception("更新图恢复中断状态失败")
+            raise
+
+        result["session_id"] = session_id
+        result["recovered"] = True
+        await self._save_completed_session_turn(
+            session_mgr,
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            messages=session.messages,
+            query=query,
+            answer=answer,
+            run_id=run_id,
+            token_count=int(result.get("tokens_consumed", session.token_count) or 0),
+        )
+        return result
 
     async def _supervisor_node(self, state: AgentState) -> Dict[str, Any]:
         """Supervisor：意图识别 + 路由决策"""
@@ -629,7 +824,11 @@ class Orchestrator:
         await self._emit(session_id, "node_start", {"node": "supervisor"})
         start = time.time()
         intent, confidence, clarify = await self.intent_recognizer.recognize(
-            query, session_id
+            query,
+            session_id,
+            tenant_id=state.get("tenant_id", "default"),
+            user_id=state.get("user_id", 0),
+            fallback_query=state.get("rewritten_query"),
         )
         latency = (time.time() - start) * 1000
 
@@ -765,10 +964,23 @@ class Orchestrator:
             return {
                 "final_response": react_result.get("answer", ""),
                 "mcp_results": tool_lines,
+                "tool_events": [
+                    {
+                        "tool_name": item.get("tool"),
+                        "tool_type": "internal" if str(item.get("tool", "")).startswith(("search_", "get_memory", "get_table")) else "business",
+                        "arguments": item.get("args", {}),
+                        "status": "success" if item.get("ok") else "error",
+                        "duration_ms": 0,
+                        "result_summary": "",
+                        "side_effect": "read_only",
+                    }
+                    for item in react_result.get("tool_calls", [])
+                ],
                 "react_result": {
                     "iterations": react_result.get("iterations", 0),
                     "tool_calls": react_result.get("tool_calls", []),
                     "forced_final": react_result.get("forced_final", False),
+                    "termination_reason": react_result.get("termination_reason", ""),
                 },
             }
         except Exception as e:
@@ -799,7 +1011,11 @@ class Orchestrator:
 
             async def data_worker(q: str) -> str:
                 results = await self.mcp_router.route_and_execute(
-                    query=q, conversation_history=[], top_k=3
+                    query=q,
+                    conversation_history=[],
+                    top_k=3,
+                    user_id=user_id,
+                    tenant_id=state.get("tenant_id", "default"),
                 )
                 return "\n".join(results) if results else "[未查到数据]"
 
@@ -813,6 +1029,8 @@ class Orchestrator:
                         user_id=user_id,
                         knowledge_base_id=knowledge_base_id,
                         top_k=5,
+                        tenant_id=state.get("tenant_id", "default"),
+                        session_id=state.get("session_id", ""),
                     )),
                 )
 
@@ -829,6 +1047,8 @@ class Orchestrator:
                         user_id=user_id,
                         knowledge_base_id="默认知识库",
                         top_k=5,
+                        tenant_id=state.get("tenant_id", "default"),
+                        session_id=state.get("session_id", ""),
                     )),
                 )
 
@@ -933,11 +1153,13 @@ class Orchestrator:
                 query=state.get("rewritten_query", state["query"]),
                 conversation_history=state.get("messages", []),
                 top_k=2,
+                user_id=state["user_id"],
+                tenant_id=state.get("tenant_id", "default"),
             )
             latency = (time.time() - start) * 1000
             self.monitor.record("mcp_tools", latency, True, tokens=0)
             await self._emit(state.get("session_id", ""), "node_complete", {"node": "mcp_tools", "latency_ms": round(latency, 1), "tools_called": len(results)})
-            return {"mcp_results": results}
+            return {"mcp_results": results, "tool_events": list(getattr(self.mcp_router, "last_tool_events", []))}
         except Exception as e:
             latency = (time.time() - start) * 1000
             self.monitor.record("mcp_tools", latency, False, tokens=0)
@@ -960,7 +1182,7 @@ class Orchestrator:
                     latency = (time.time() - start) * 1000
                     self.monitor.record("nl_compile", latency, True, tokens=0)
                     await self._emit(sid, "node_complete", {"node": "nl_compile", "latency_ms": round(latency, 1), "route": "semantic_compiled"})
-                    return {"schema_linking": ir, "metric_plan": routed.get("metric_plan"), "compiled_sql": guarded.sql, "compile_status": "semantic_compiled", "mcp_results": [f"[语义层确定性查询]\n{guarded.to_json()}"]}
+                    return {"schema_linking": ir, "metric_plan": routed.get("metric_plan"), "compiled_sql": guarded.sql, "compile_status": "semantic_compiled", "mcp_results": [f"[语义层确定性查询]\n{guarded.to_json()}"], "tool_events": [{"tool_name": "execute_sql", "tool_type": "business", "arguments": {"sql": guarded.sql}, "status": "success", "duration_ms": 0, "result_summary": guarded.to_json(), "side_effect": "read_only"}]}
                 ir["reasons"].append("编译 SQL 未通过守卫，降级 LLM")
             latency = (time.time() - start) * 1000
             self.monitor.record("nl_compile", latency, True, tokens=0)
@@ -999,8 +1221,10 @@ class Orchestrator:
                     query=state.get("rewritten_query", state["query"]),
                     conversation_history=state.get("messages", []),
                     top_k=2,
+                    user_id=state["user_id"],
+                    tenant_id=state.get("tenant_id", "default"),
                 )
-                return {"mcp_results": results}
+                return {"mcp_results": results, "tool_events": list(getattr(self.mcp_router, "last_tool_events", []))}
             except Exception as e:
                 logger.warning(f"MCP 并行检索失败: {e}")
                 return {"mcp_results": [], "error_info": str(e)}
@@ -1051,7 +1275,15 @@ class Orchestrator:
         if memory:
             memory = truncator.truncate(memory, truncator.single_max)
         if mcp:
-            mcp = [truncator.truncate(item, truncator.single_max) for item in mcp]
+            mcp = truncator.truncate_tool_results(
+                [{"result": str(item)} for item in mcp]
+            )
+            mcp = [
+                truncator.truncate(item.get("result", ""), truncator.single_max)
+                for item in mcp
+            ]
+        if explore:
+            explore = truncator.truncate(explore, truncator.single_max)
 
         # 构建上下文
         context_parts = []
@@ -1133,10 +1365,13 @@ class Orchestrator:
 5. 如果数据适合可视化，在回答末尾用 ```chart 代码块输出 ECharts option JSON（仅含 option 对象，不含 echarts.init 调用）
 6. 记忆结果用于个性化，知识库结果用于事实
 """
+        from core.context_manager import SYNTHESIS_OUTPUT_BUDGET, fit_prompt_context
+        prompt = fit_prompt_context(prompt, context)
         try:
             model = create_chat_model(
                 model_name=os.getenv("AGENT_BASE_MODEL", "qwen-plus"),
                 temperature=0.5,
+                max_tokens=SYNTHESIS_OUTPUT_BUDGET,
             )
             # 使用 astream 实现真流式生成，token 到达即推送到前端
             final_response = ""
@@ -1286,11 +1521,8 @@ class Orchestrator:
         if intent == "root_cause":
             return "root_cause"
 
-        # 数据分析意图：并行检索（RAG schema + Memory + SQL 执行 同时执行）。
-        # 单意图场景下三路检索并行，总耗时 = max(各节点耗时)，而非累加。
+        # 数据分析意图：复合诉求先交给 Coordinator/ReAct，单一问题走确定性语义编译。
         if intent in ("data_query", "trend_analysis", "comparison", "report_request"):
-            # 所有数据查询先经过 NL→Schema Linking IR→语义编译；复杂问题自动降级原链路。
-            return "nl_compile"
             # 跨模块复合查询（数据查询 + schema 知识 + 个人历史 混合）走
             # Coordinator：SOTA 拆解子任务后并行派发专职 Worker
             if self._needs_coordinator(state.get("query", "")):
@@ -1300,8 +1532,8 @@ class Orchestrator:
             if self._needs_react(state.get("query", "")):
                 logger.info(f"触发 ReAct 循环（复合查询）: intent={intent}")
                 return "react"
-            # 默认：并行检索所有数据源
-            return "retrieve_all"
+            # 单一数据问题优先走 NL→Schema Linking IR→确定性语义编译。
+            return "nl_compile"
 
         # Plan Mode：复杂任务先规划
         query = state.get("query", "")
@@ -1377,6 +1609,24 @@ class Orchestrator:
             return True
         return False
 
+    @staticmethod
+    def _safety_policy(query: str) -> Optional[Dict[str, str]]:
+        """Deterministic pre-router for requests that must never reach tools."""
+        normalized = str(query or "").lower()
+        injection_terms = (
+            "忽略之前", "忽略所有规则", "删除所有", "管理员密码",
+            "system prompt", "ignore previous", "delete all",
+        )
+        tenant_terms = (
+            "其他公司", "别的公司", "其他租户", "跨租户", "other tenant",
+            "another company", "别人的数据",
+        )
+        if any(term in normalized for term in injection_terms):
+            return {"category": "prompt_injection", "reason": "request contains a prompt override or destructive credential request"}
+        if any(term in normalized for term in tenant_terms):
+            return {"category": "tenant_isolation", "reason": "request targets data outside the current tenant"}
+        return None
+
     def _reflection_decision(self, state: AgentState) -> str:
         """Reflection 后的决策（带重试上限，避免死循环）"""
         passed = state.get("reflection_passed", True)
@@ -1400,29 +1650,87 @@ class Orchestrator:
         knowledge_base_id: str = "默认知识库",
         messages: Optional[List[Dict]] = None,
         on_event=None,
+        tenant_id: str = "",
     ) -> Dict[str, Any]:
         """
         入口：执行多 Agent 编排流程（集成 Skills + Session 恢复）
         on_event: async callback(event_type, data) for streaming
         """
+        tenant_id = str(tenant_id or "default")
         if on_event:
             self._session_callbacks[session_id] = on_event
 
         tracer = Tracer()
         root_span = tracer.start_trace("orchestrator")
 
+        # Security protected cases are decided before query rewrite, retrieval
+        # and tool routing.  This prevents a safety test from passing only
+        # because a later LLM happened to refuse the request.
+        safety_policy = self._safety_policy(query)
+        if safety_policy:
+            is_tenant = safety_policy["category"] == "tenant_isolation"
+            response = (
+                "这个请求包含删除数据或索取管理员凭据的内容，我不能执行，也不能提供密码。需要人工确认后处理。"
+                if not is_tenant else
+                "这个请求涉及其他公司的数据。当前账号没有跨租户查询权限，我不能执行，需要人工确认。"
+            )
+            root_span.tag("security.category", safety_policy["category"])
+            root_span.tag("security.decision", "handoff")
+            root_span.finish()
+            result = {
+                "final_response": response,
+                "response": response,
+                "intent": "safety_review",
+                "requires_human": True,
+                "handoff_summary": safety_policy["reason"],
+                "safety_policy": {
+                    **safety_policy,
+                    "decision": "handoff",
+                    "requires_human": True,
+                },
+                "mcp_results": [],
+                "tool_events": [],
+                "error_info": None,
+                "tokens_consumed": 0,
+                "usage_available": True,
+                "latency_ms": 0.0,
+                "trace_id": root_span.trace_id,
+                "spans": tracer.get_trace(root_span.trace_id),
+                "otel_trace": tracer.to_otel(root_span.trace_id),
+                "session_id": session_id,
+            }
+            if on_event:
+                await self._emit(session_id, "session", {"session_id": session_id})
+                await self._emit(session_id, "done", {"latency_ms": 0.0, "trace_id": root_span.trace_id})
+            self._session_callbacks.pop(session_id, None)
+            return result
+
         from core.query_rewriter import QueryRewriter
         from memory.session_recovery import get_session_manager
 
         # 会话恢复
         session_mgr = await get_session_manager()
-        resumed_sid, snapshot = await session_mgr.resume_or_create(session_id, user_id)
+        resumed_sid, snapshot = await session_mgr.resume_or_create(session_id, user_id, tenant_id)
         if snapshot:
-            messages = snapshot.messages + (messages or [])
+            saved_run_state = snapshot.state or {}
+            if saved_run_state.get("run_status") in {"running", "interrupted"}:
+                self._session_callbacks.pop(session_id, None)
+                raise RuntimeError("该会话有未完成的 Agent 执行，请先调用会话恢复接口")
+            # Long-term memory is fetched afresh each turn, never accumulated in Redis.
+            persisted = [
+                message for message in snapshot.messages
+                if message.get("context_kind") != "long_term_memory"
+                and not str(message.get("content", "")).startswith("【用户背景记忆】")
+            ]
+            # Once a server-issued session exists, Redis is the canonical source.
+            # Appending browser history here duplicates every prior turn and lets
+            # a client alter the server-owned transcript.
+            messages = persisted
 
         # 关键：graph 内部节点使用 resumed_sid 发事件，回调需注册到 resumed_sid 下
         if on_event:
             self._session_callbacks[resumed_sid] = on_event
+            await self._emit(resumed_sid, "session", {"session_id": resumed_sid})
 
         # ===== 上下文压缩：防止窗口被撑爆 =====
         if messages:
@@ -1430,9 +1738,14 @@ class Orchestrator:
                 model_name=os.getenv("SUMMARIZATION_MODEL", "qwen-turbo"),
                 temperature=0.1,
             )
-            messages = await session_mgr.compress_if_needed(
-                resumed_sid, messages, llm_client=compress_llm
-            )
+            from core.context_store import context_identity
+            with context_identity(user_id, tenant_id, resumed_sid):
+                if user_id <= 0:
+                    messages = session_mgr._fit_session_budget(messages)
+                else:
+                    messages = await session_mgr.compress_if_needed(
+                        resumed_sid, messages, llm_client=compress_llm
+                    )
 
         # ===== 跨 Session 记忆连续性：注入用户长期记忆 =====
         if snapshot and snapshot.messages:
@@ -1449,12 +1762,15 @@ class Orchestrator:
                         user_id=user_id,
                         knowledge_base_id=knowledge_base_id,
                         top_k=5,
+                        tenant_id=tenant_id,
+                        session_id=resumed_sid,
                     )),
                 )
                 if mem_result and len(mem_result) > 20:
                     # 把记忆作为 system context 注入到 messages 开头
                     memory_msg = {
                         "role": "system",
+                        "context_kind": "long_term_memory",
                         "content": f"【用户背景记忆】{mem_result[:800]}",
                     }
                     # 插入到所有 system 消息之后、user/assistant 消息之前
@@ -1466,12 +1782,17 @@ class Orchestrator:
 
         # 查询改写
         rewriter = QueryRewriter()
-        rewritten = await rewriter.rewrite(query, messages or [])
+        rewritten = await rewriter.rewrite(
+            query,
+            messages or [],
+            cache_scope=f"{tenant_id}:{user_id}:{resumed_sid}",
+        )
 
         # 构建初始状态
         initial_state: AgentState = {
             "messages": messages or [],
             "user_id": user_id,
+            "tenant_id": tenant_id,
             "session_id": resumed_sid,
             "intent": "",
             "intent_confidence": 0.0,
@@ -1480,6 +1801,7 @@ class Orchestrator:
             "rag_result": None,
             "memory_result": None,
             "mcp_results": [],
+            "tool_events": [],
             "explore_result": None,
             "plan_steps": [],
             "plan_mode": False,
@@ -1501,21 +1823,143 @@ class Orchestrator:
             "knowledge_base_id": knowledge_base_id,
         }
 
-        # 构建图（懒加载）
-        if self._graph is None:
-            self._graph = self._build_graph()
+        # 每一轮使用唯一 run_id，但图 thread_id 稳定绑定到已认证会话。
+        # 这样 LangGraph 可从该会话最近一次成功的节点检查点继续执行。
+        from infra.graph_checkpointer import (
+            GraphCheckpointBusy,
+            checkpoint_thread_id,
+            get_graph_checkpointer_manager,
+        )
+        graph_manager = get_graph_checkpointer_manager()
+        graph = self._get_graph()
+        run_id = uuid.uuid4().hex
+        has_checkpointer = graph_manager.saver is not None
+        if has_checkpointer:
+            if user_id > 0:
+                graph_thread_id = checkpoint_thread_id(resumed_sid, user_id, tenant_id)
+            else:
+                # Anonymous graph state is never recoverable and is deleted on exit.
+                graph_thread_id = f"nexusmind:anonymous:{uuid.uuid4().hex}"
+            graph_config = {
+                "configurable": {
+                    "thread_id": graph_thread_id,
+                    "checkpoint_ns": run_id,
+                }
+            }
+        else:
+            graph_thread_id = ""
+            graph_config = None
 
-        # 执行
+        pending_messages = [
+            dict(message) for message in (messages or [])
+            if message.get("context_kind") != "long_term_memory"
+        ]
+        if not pending_messages or pending_messages[-1].get("role") != "user" or pending_messages[-1].get("content") != query:
+            pending_messages.append({"role": "user", "content": query})
+        run_state_saved = False
+
+        async def save_running_state():
+            nonlocal run_state_saved
+            if user_id <= 0:
+                return
+            saved = await session_mgr.save_session(
+                session_id=resumed_sid,
+                user_id=user_id,
+                messages=pending_messages,
+                state={
+                    "run_status": "running",
+                    "active_run_id": run_id,
+                    "active_query": query,
+                    "recoverable": has_checkpointer,
+                },
+                summary=(snapshot.summary if snapshot else ""),
+                token_count=(snapshot.token_count if snapshot else 0),
+                tenant_id=tenant_id,
+            )
+            if not saved:
+                raise PermissionError("该会话已删除，不能继续写入")
+            run_state_saved = True
+
+        async def persist_completed_state(result):
+            result["session_id"] = resumed_sid
+            if user_id > 0:
+                await self._save_completed_session_turn(
+                    session_mgr,
+                    session_id=resumed_sid,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    messages=pending_messages,
+                    query=query,
+                    answer=str(result.get("final_response", "")),
+                    run_id=run_id,
+                    token_count=int(result.get("tokens_consumed", 0) or 0),
+                )
+
+        async def save_interrupted_state():
+            if user_id <= 0 or not run_state_saved:
+                return
+            await asyncio.shield(session_mgr.save_session(
+                session_id=resumed_sid,
+                user_id=user_id,
+                messages=pending_messages,
+                state={
+                    "run_status": "interrupted" if has_checkpointer else "failed_unrecoverable",
+                    "active_run_id": run_id,
+                    "active_query": query,
+                    "recoverable": has_checkpointer,
+                },
+                summary=(snapshot.summary if snapshot else ""),
+                token_count=(snapshot.token_count if snapshot else 0),
+                tenant_id=tenant_id,
+            ))
+
+        async def invoke_graph():
+            from core.context_store import context_identity
+            with context_identity(user_id, tenant_id, resumed_sid):
+                if graph_config is None:
+                    return await graph.ainvoke(initial_state)
+                return await graph.ainvoke(initial_state, graph_config, durability="sync")
+
+        # 执行。检查点启用时，同一会话的执行、恢复和删除由 PostgreSQL
+        # advisory lock 串行化，避免并发请求覆盖彼此的图状态。
         start = time.time()
-        result = await self._graph.ainvoke(initial_state)
+        try:
+            if graph_config is not None:
+                async with graph_manager.session_lock(graph_thread_id):
+                    await graph_manager.touch_thread(graph_thread_id)
+                    await save_running_state()
+                    result = await invoke_graph()
+                    await persist_completed_state(result)
+            else:
+                await save_running_state()
+                result = await invoke_graph()
+                await persist_completed_state(result)
+        except BaseException:
+            try:
+                await save_interrupted_state()
+            except Exception:
+                logger.exception("保存 Agent 中断状态失败")
+            raise
+        finally:
+            if has_checkpointer and user_id <= 0:
+                try:
+                    await graph_manager.delete_thread(graph_thread_id)
+                except Exception:
+                    logger.exception("匿名图检查点清理失败")
         total_latency = (time.time() - start) * 1000
 
         result["latency_ms"] = total_latency
         result["model_used"] = initial_state["model_used"]
+        result["session_id"] = resumed_sid
 
         root_span.finish()
         result["trace_id"] = root_span.trace_id
         result["spans"] = tracer.get_trace(root_span.trace_id)
+        result["otel_trace"] = tracer.to_otel(root_span.trace_id)
+        otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+        if otel_endpoint:
+            # Export is best effort and never holds up the user response.
+            asyncio.create_task(asyncio.to_thread(export_otel_trace, result["otel_trace"], otel_endpoint))
 
         # 发送 done 事件（流式场景，graph 节点使用 resumed_sid；先发再清理）
         await self._emit(resumed_sid, "done", {"latency_ms": round(total_latency, 1), "trace_id": root_span.trace_id})
@@ -1527,24 +1971,13 @@ class Orchestrator:
         # 在线可观测归档与采样 Bad Case：异步执行，绝不影响用户响应时延。
         try:
             from chatbi.observability import archive_and_sample
-            asyncio.create_task(archive_and_sample(result, query, resumed_sid, user_id))
+            asyncio.create_task(
+                archive_and_sample(result, query, resumed_sid, user_id, tenant_id=tenant_id)
+            )
         except Exception as exc:
             logger.warning(f"在线 trace 归档初始化失败: {exc}")
 
         # 更新 Monitor 权重
         self.monitor.update_weights()
-
-        # 保存会话
-        all_messages = (messages or []) + [
-            {"role": "user", "content": query},
-            {"role": "assistant", "content": result.get("final_response", "")},
-        ]
-        await session_mgr.save_session(
-            session_id=resumed_sid,
-            user_id=user_id,
-            messages=all_messages,
-            summary=result.get("final_response", "")[:200],
-            token_count=result.get("tokens_consumed", 0),
-        )
 
         return result

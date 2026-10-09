@@ -167,6 +167,30 @@ class SchemaRetriever:
 
     _CACHE_CAP = 256
 
+    # The physical corpus is predominantly English. Expand only governed
+    # business aliases, not arbitrary model-invented table/column names.
+    _COLUMN_ALIASES = {
+        "customer_state": ("各州", "客户州", "地区", "地域"),
+        "seller_state": ("卖家州", "商家州"),
+        "product_category_name": ("品类", "类目", "商品分类", "类别"),
+        "price": ("销售额", "销售收入", "成交额", "gmv"),
+        "payment_value": ("销售额", "支付金额", "客单价", "gmv", "成交额"),
+        "payment_type": ("支付方式", "支付类型"),
+        "order_id": ("订单量", "订单数"),
+        "order_purchase_timestamp": ("按月", "月度", "月份", "订单趋势"),
+        "review_score": ("评分", "差评率", "好评率"),
+    }
+
+    @classmethod
+    def _table_query(cls, query: str) -> str:
+        available_columns = {c.lower() for table in TABLES.values() for c in table["columns"]}
+        expanded = [column for column, aliases in cls._COLUMN_ALIASES.items()
+                    if column.lower() in available_columns
+                    and any(alias.lower() in query.lower() for alias in aliases)]
+        if re.search(r"(?<![A-Za-z])[A-Z]{2}\s*州", query) and "customer_state" in available_columns:
+            expanded.append("customer_state")
+        return query + " " + " ".join(expanded)
+
     def __init__(self):
         self._domain_names = list(DOMAINS.keys())
         domain_corpus = [
@@ -218,7 +242,7 @@ class SchemaRetriever:
             candidate_tables.extend(domain["tables"])
 
         # ---- Level 2: 表（域内候选 + 全局直命中表，避免域漏判导致丢表） ----
-        global_table_rank = self._table_index.rank(query)
+        global_table_rank = self._table_index.rank(self._table_query(query))
         global_score = {self._table_names[i]: s for i, s in global_table_rank}
         candidate_set = list(dict.fromkeys(candidate_tables)) + [
             t for t in self._table_names if t in global_score and t not in candidate_tables]

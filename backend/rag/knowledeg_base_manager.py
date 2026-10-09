@@ -224,7 +224,26 @@ class KnowledgeBaseManager:
         # 生成稠密向量，带重试机制
         dense_vector = await self.get_dense_vector(query)
         if not dense_vector:
-            return []
+            logger.warning("查询向量不可用，知识库检索改用 BM25 稀疏检索")
+            try:
+                results = await self.client.search(
+                    collection_name=self.collection_name,
+                    data=[query],
+                    anns_field="sparse_bm25",
+                    search_params={"metric_type": "BM25"},
+                    limit=top_k,
+                    filter=filter_expr,
+                    output_fields=["parent_id"],
+                )
+                parent_ids = dict.fromkeys(
+                    hit["entity"].get("parent_id")
+                    for hit in (results[0] if results else [])
+                    if hit.get("entity", {}).get("parent_id")
+                )
+                return list(parent_ids)
+            except Exception as e:
+                logger.error(f"Embedding 和 BM25 检索均失败: {e}")
+                return []
         writer(f"查询向量嵌入耗时：{time.time() - start_time:.4f} 秒")
 
         # 创建搜索请求

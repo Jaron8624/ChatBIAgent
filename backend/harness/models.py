@@ -82,6 +82,18 @@ class EvalCase:
     tags: List[str] = field(default_factory=list)
     protected: bool = False
     repetitions: int = 1
+    # protected is kept for backward compatibility.  New datasets should use
+    # the explicit class/suite fields so a security case is not mixed with a
+    # normal regression case.
+    protected_class: str = ""
+    suite: str = "regression"
+    seed: Optional[int] = None
+
+    def resolved_suite(self) -> str:
+        return self.suite or ("security" if self.protected else "regression")
+
+    def resolved_protected_class(self) -> str:
+        return self.protected_class or ("security" if self.protected else "core_regression")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -133,6 +145,8 @@ class ExecutionResult:
     cost: float = 0.0
     error: str = ""
     usage_available: bool = False
+    usage: Dict[str, Any] = field(default_factory=dict)
+    tool_events: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -172,6 +186,9 @@ class RunManifest:
     model_parameters: Dict[str, Any]
     environment: Dict[str, Any]
     config_hash: str
+    random_seed: int = 0
+    dataset_split: str = "all"
+    release_channel: str = "offline"
     started_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -189,16 +206,29 @@ class RunManifest:
         model: str,
         model_parameters: Optional[Dict[str, Any]] = None,
         config: Optional[Dict[str, Any]] = None,
+        random_seed: int = 0,
+        dataset_split: str = "all",
+        release_channel: str = "offline",
     ) -> "RunManifest":
         git_sha = "unknown"
         git_dirty = True
         try:
             git_sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=project_root, text=True, stderr=subprocess.DEVNULL
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_root,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stderr=subprocess.DEVNULL,
             ).strip()
             git_dirty = bool(
                 subprocess.check_output(
-                    ["git", "status", "--porcelain"], cwd=project_root, text=True, stderr=subprocess.DEVNULL
+                    ["git", "status", "--porcelain"],
+                    cwd=project_root,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
                 ).strip()
             )
         except (OSError, subprocess.CalledProcessError):
@@ -228,6 +258,9 @@ class RunManifest:
             model_parameters=model_parameters or {},
             environment=safe_env,
             config_hash=content_hash(cfg),
+            random_seed=random_seed,
+            dataset_split=dataset_split,
+            release_channel=release_channel,
         )
 
 
@@ -243,6 +276,8 @@ class GatePolicy:
     require_usage_metrics: bool = False
     min_cases: int = 1
     require_clean_git: bool = False
+    required_suite_pass_rates: Dict[str, float] = field(default_factory=lambda: {"security": 1.0})
+    require_holdout_pass_rate: Optional[float] = None
     required_metrics: List[str] = field(default_factory=lambda: [
         "case_pass_rate",
         "intent_accuracy",

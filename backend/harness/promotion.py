@@ -18,6 +18,15 @@ class PromotionManager:
         if not rule.harness_candidate_id:
             raise PermissionError("rule has not entered the Harness candidate registry")
         gate = self.service.require_promotion_gate(rule.harness_candidate_id)
+        # Record an explicit release approval before changing the live Skill
+        # registry.  This keeps the human/role decision separate from the
+        # offline quality Gate.
+        self.service.approve_candidate(
+            rule.harness_candidate_id,
+            actor=actor,
+            gate_decision_id=gate["decision_id"],
+            comment="EvolutionLoop promotion request approved by release manager",
+        )
         rule.status = "evaluated"
         if not engine.activate_rule(rule_id):
             raise RuntimeError("rule activation failed after gate approval")

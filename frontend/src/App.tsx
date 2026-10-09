@@ -45,11 +45,15 @@ const VIEW_TITLE: Record<ViewId, string> = {
   audit: '审计',
 }
 
-const ROLES = ['admin', 'operator', 'viewer', 'user', 'guest']
+const ROLES = ['admin', 'editor', 'viewer', 'guest']
 
 export default function App() {
   const [view, setView] = useState<ViewId>('chat')
   const [chatResetKey, setChatResetKey] = useState(0)
+  const [restoreSession, setRestoreSession] = useState<{
+    session_id: string
+    messages: { role: string; content: string }[]
+  } | null>(null)
   const [connected, setConnected] = useState<'ok' | 'bad' | 'pending'>('pending')
   const [role, setRole] = useState(getApiContext().role)
   const [userId, setUserId] = useState(getApiContext().userId)
@@ -88,6 +92,17 @@ export default function App() {
   }, [])
 
   const newChat = () => {
+    setRestoreSession(null)
+    localStorage.removeItem('nexusmind.activeSessionId')
+    setChatResetKey((k) => k + 1)
+    setView('chat')
+  }
+
+  const continueSession = (session: {
+    session_id: string
+    messages: { role: string; content: string }[]
+  }) => {
+    setRestoreSession(session)
     setChatResetKey((k) => k + 1)
     setView('chat')
   }
@@ -263,9 +278,15 @@ export default function App() {
         </div>
 
         <div className="view-container" style={view === 'chat' ? { padding: 0, display: 'flex', flexDirection: 'column' } : undefined}>
-          {view === 'chat' && <ChatView key={chatResetKey} />}
+          {view === 'chat' && (
+            <ChatView
+              key={chatResetKey}
+              initialSession={restoreSession}
+              onInitialSessionLoaded={() => setRestoreSession(null)}
+            />
+          )}
           {view === 'overview' && <OverviewView onNavigate={(v) => setView(v as ViewId)} />}
-          {view === 'sessions' && <SessionsView />}
+          {view === 'sessions' && <SessionsView onContinue={continueSession} />}
           {view === 'mcp' && <McpView />}
           {view === 'knowledge' && <KnowledgeView />}
           {view === 'eval' && <EvalView />}

@@ -14,6 +14,11 @@ from typing import Set
 from memory.auto_store_memory_from_psql import run_compression_task
 from infra.redis_cache import get_redis_client, close_redis_client, close_redis_binary_client
 from evaluation.evolution_loop import get_evolution_loop
+from infra.graph_checkpointer import (
+    close_graph_checkpointer,
+    get_graph_checkpointer_manager,
+    initialize_graph_checkpointer,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -35,6 +40,19 @@ async def check_and_store_memory():
         except Exception as e:
             logger.error(f"记忆存储任务失败: {e}")
         await asyncio.sleep(180)
+
+
+async def prune_graph_checkpoints():
+    """Apply the configured idle-retention period to persisted graph state."""
+    manager = get_graph_checkpointer_manager()
+    while True:
+        try:
+            removed = await manager.prune_expired()
+            if removed:
+                logger.info("过期图检查点已清理: %s 个会话", removed)
+        except Exception:
+            logger.exception("清理过期图检查点失败")
+        await asyncio.sleep(3600)
 
 # 全局追踪所有后台任务
 background_tasks: Set[asyncio.Task] = set()
@@ -75,6 +93,25 @@ async def lifespan(app: FastAPI):
             logger.error(f"Redis 客户端初始化失败: {e}")
             raise
 
+        checkpoint_setting = os.getenv("GRAPH_CHECKPOINT_ENABLED", "auto").strip().lower()
+        checkpoint_key_present = bool(os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "").strip())
+        checkpoint_enabled = checkpoint_setting in {"1", "true", "yes", "on"} or (
+            checkpoint_setting == "auto" and checkpoint_key_present
+        )
+        if checkpoint_setting in {"0", "false", "no", "off"}:
+            checkpoint_enabled = False
+        if checkpoint_enabled:
+            await initialize_graph_checkpointer()
+            task = asyncio.create_task(prune_graph_checkpoints())
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+            logger.info("【图执行恢复】PostgreSQL Checkpointer 已启用")
+        else:
+            logger.warning(
+                "【图执行恢复】未启用。设置 GRAPH_CHECKPOINT_ENABLED=true 并配置加密密钥后，"
+                "才能持久化和恢复中断的图执行。"
+            )
+
         #所有连接成功后创建后台定时任务，每3分钟检查一次是否提取存在psql中的消息存为记忆
         task = asyncio.create_task(check_and_store_memory())
         background_tasks.add(task)
@@ -101,6 +138,12 @@ async def lifespan(app: FastAPI):
 
     
     try:  
+        # 先停后台任务，避免清理期间仍有记忆提取或自进化任务访问连接池。
+        for task in list(background_tasks):
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
         # 关闭 Milvus 连接
         if milvus_initialized and app.state.milvus_client:
             await app.state.milvus_client.close()
@@ -115,13 +158,9 @@ async def lifespan(app: FastAPI):
         await close_redis_binary_client()
         logger.info("✓ Redis 连接已关闭")
 
-        # 取消所有后台任务
-        for task in background_tasks:
-            task.cancel()
-        
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-            
+        await close_graph_checkpointer()
+        logger.info("✓ LangGraph 检查点连接已关闭")
+
     except Exception as e:
         logger.error(f"清理连接时出错: {e}")
 
@@ -135,9 +174,17 @@ app = FastAPI(title="NexusMind-企业级智能知识助手", lifespan=lifespan)
 app.include_router(api.router)
 
 # 解决前端跨域访问问题
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

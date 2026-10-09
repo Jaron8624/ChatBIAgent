@@ -1,6 +1,9 @@
 import os
 import asyncio
 import time
+import hashlib
+import json
+import math
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Any
 from rag.embedding_provider import get_embeddings
@@ -9,9 +12,19 @@ from pymilvus import AnnSearchRequest, RRFRanker
 import logging
 
 logger = logging.getLogger(__name__)
+from memory.policy import cosine, content_hash
 
 # 加载环境变量
 load_dotenv()
+
+
+def memory_scope_user_id(user_id: int, tenant_id: str = "default") -> int:
+    """Map tenant-owned memories onto the existing INT64 partition key safely."""
+    tenant = str(tenant_id or "default")
+    if tenant == "default":
+        return int(user_id)
+    digest = hashlib.sha256(f"{tenant}\0{int(user_id)}".encode("utf-8")).digest()
+    return (int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF) or 1
 
 
 class MemoryManager:
@@ -171,17 +184,29 @@ class MemoryManager:
         semantic_k: int,
         episodic_k: int,
         procedural_k: int,
+        tenant_id: str = "default",
     ) -> Dict[str, List[Dict]]:
         """混合检索，每种记忆类型并行检索、去重，返回召回的相似记忆内容"""
 
+        scoped_user_id = memory_scope_user_id(user_id, tenant_id)
+        ttl_days = max(0, int(os.getenv("LONG_TERM_MEMORY_TTL_DAYS", "0")))
+        expiry_clause = (
+            f" and created_at >= {int(time.time()) - ttl_days * 86400}"
+            if ttl_days
+            else ""
+        )
+
+        requested = {"summary": summary_k, "semantic": semantic_k,
+                     "episodic": episodic_k, "procedural": procedural_k}
+        if any(not isinstance(k, int) or isinstance(k, bool) or not 0 <= k <= 5 for k in requested.values()):
+            raise ValueError("记忆召回数量必须是0到5的整数")
         memory_configs = {
-            key: {"k": k, "filter": f"user_id == {user_id} and memory_type == '{key}'"}
-            for key, k in {
-                "summary": summary_k,
-                "semantic": semantic_k,
-                "episodic": episodic_k,
-                "procedural": procedural_k,
-            }.items()
+            key: {
+                "k": k,
+                "filter": f"user_id == {scoped_user_id} and memory_type == '{key}'{expiry_clause}"
+                          ' and (not exists status or status == "active")',
+            }
+            for key, k in requested.items()
             if k
         }
 
@@ -215,14 +240,8 @@ class MemoryManager:
                     reqs=[dense_req, sparse_req],
                     ranker=RRFRanker(),
                     limit=k * 3,
-                    output_fields=[
-                        "id",
-                        "memory_type",
-                        "content",
-                        "summary_id",
-                        "importance",
-                        "last_access_at",
-                    ],
+                    output_fields=["*"],
+                    consistency_level="Strong",
                 )
 
                 memories = []
@@ -231,6 +250,8 @@ class MemoryManager:
                 if results and len(results) > 0:
                     for hit in results[0]:
                         entity = hit["entity"]
+                        if entity.get("status", "active") != "active":
+                            continue
                         memory_id = entity.get("id")
 
                         if memory_id and memory_id not in seen_ids:
@@ -243,11 +264,18 @@ class MemoryManager:
                                     "summary_id": entity.get("summary_id"),
                                     "importance": entity.get("importance"),
                                     "last_access_at": entity.get("last_access_at"),
-                                    "score": hit["distance"],
+                                    "created_at": entity.get("created_at", 0),
+                                    "updated_at": entity.get("updated_at", entity.get("created_at", 0)),
+                                    "memory_key": entity.get("memory_key", ""),
+                                    "version": entity.get("version", 1),
+                                    "source_message_ids": entity.get("source_message_ids", []),
+                                    "evidence_kind": entity.get("evidence_kind", "legacy"),
+                                    "score": cosine(dense_vector, entity.get("vector", [])),
+                                    "score_kind": "cosine",
                                 }
                             )
 
-                return {memory_type: memories[: k * 2]}
+                return {memory_type: memories}
 
             except Exception as e:
                 logger.error(
@@ -262,20 +290,16 @@ class MemoryManager:
                         search_params={"metric_type": "COSINE", "params": {"ef": 64}},
                         limit=k * 6,
                         filter=filter_expr,
-                        output_fields=[
-                            "id",
-                            "memory_type",
-                            "content",
-                            "summary_id",
-                            "importance",
-                            "last_access_at",
-                        ],
+                        output_fields=["*"],
+                        consistency_level="Strong",
                     )
 
                     memories = []
                     if results and len(results) > 0:
                         for hit in results[0]:
                             entity = hit["entity"]
+                            if entity.get("status", "active") != "active":
+                                continue
                             memories.append(
                                 {
                                     "id": entity.get("id"),
@@ -285,10 +309,17 @@ class MemoryManager:
                                     "importance": entity.get("importance"),
                                     "last_access_at": entity.get("last_access_at"),
                                     "score": hit["distance"],
+                                    "score_kind": "cosine",
+                                    "created_at": entity.get("created_at", 0),
+                                    "updated_at": entity.get("updated_at", entity.get("created_at", 0)),
+                                    "memory_key": entity.get("memory_key", ""),
+                                    "version": entity.get("version", 1),
+                                    "source_message_ids": entity.get("source_message_ids", []),
+                                    "evidence_kind": entity.get("evidence_kind", "legacy"),
                                 }
                             )
 
-                    return {memory_type: memories[: k * 2]}
+                    return {memory_type: memories}
 
                 except Exception as search_e:
                     logger.error(f"记忆类型 {memory_type} 稠密检索也失败：{search_e}")
@@ -323,7 +354,10 @@ class MemoryManager:
             memory_configs=memory_configs,
         )
 
-        await self.update_memory_last_access_time(top_k_memories)
+        try:
+            await self.update_memory_last_access_time(top_k_memories)
+        except Exception:
+            logger.warning("记忆访问时间更新失败，不丢弃召回结果", exc_info=True)
 
         return top_k_memories
         """
@@ -346,42 +380,35 @@ class MemoryManager:
     async def update_memory_last_access_time(
         self, top_k_memories: Dict[str, List[Dict]]
     ):
-        """更新记忆的最后访问时间"""
-        current_timestamp = int(time.time())
-        update_data = []
+        """Report access on returned metadata without rewriting vector entities.
 
+        Milvus 2.6 auto-ID upserts can replace physical IDs, including partial
+        updates. A read must not race with retirement or invalidate a write plan.
+        Persistent access analytics belongs in the trace store, not vector rows.
+        """
+        current_timestamp = int(time.time())
         for memories in top_k_memories.values():
             for mem in memories:
-                if "id" in mem:
-                    update_data.append(
-                        {"id": mem["id"], "last_access_at": current_timestamp}
-                    )
-
-        if update_data:
-            res = await self.client.upsert(
-                collection_name=self.collection_name,
-                data=update_data,
-                partial_update=True,
-            )
-            print(f"更新记忆访问时间结果：{res}")
+                mem["last_access_at"] = current_timestamp
+                logger.debug("memory_access id=%s at=%s", mem.get("id"), current_timestamp)
 
     def get_the_top_k_memories(
         self,
         memory_dict: Dict[str, List[Dict]],
-        alpha: float = 0.45,
-        beta: float = 0.25,
-        gamma: float = 0.3,
+        alpha: float = 0.8,
+        beta: float = 0.1,
+        gamma: float = 0.1,
         memory_configs: Dict[str, Dict] = None,
         type_weights: Dict[str, float] = None,
     ) -> Dict[str, List[Dict]]:
-        """从记忆字典中提取每个记忆类型的前 k 条记录"""
-        if type_weights is None:
-            type_weights = {
-                "summary": 0.7,
-                "semantic": 1.3,
-                "episodic": 1.0,
-                "procedural": 1.2,
-            }
+        """Use comparable cosine scores; popularity never establishes freshness.
+
+        type_weights remains an API compatibility argument. Per-type quotas, not
+        a constant multiplier, determine the mix of memory types.
+        """
+        minimum = float(os.getenv("MEMORY_MIN_RELEVANCE", "0.35"))
+        if not -1 <= minimum <= 1 or not math.isfinite(minimum):
+            raise ValueError("MEMORY_MIN_RELEVANCE必须在-1到1之间")
 
         current_time = time.time()
         DECAY_RATE = 0.995
@@ -393,23 +420,38 @@ class MemoryManager:
                 result[mem_type] = []
                 continue
 
-            type_weight = type_weights.get(mem_type, 1.0)
             scored_memories = []
+            latest = {}
+            for candidate in memories:
+                key = candidate.get("memory_key")
+                if key:
+                    rank = (int(candidate.get("version", 1)), candidate.get("updated_at", 0) or 0)
+                    if key not in latest or rank > latest[key][0]:
+                        latest[key] = (rank, candidate.get("id"))
 
             for mem in memories:
-                semantic_score = mem.get("score", 0.5)
-
-                last_access = mem.get("last_access_at", current_time)
-                hours_passed = (current_time - last_access) / 3600
+                if mem.get("status", "active") != "active":
+                    continue
+                key = mem.get("memory_key")
+                if key and mem.get("id") != latest[key][1]:
+                    continue
+                semantic_score = float(mem.get("score", 0))
+                if not math.isfinite(semantic_score) or semantic_score < minimum:
+                    continue
+                if mem.get("score_kind", "cosine") != "cosine":
+                    continue
+                fresh_at = mem.get("updated_at") or mem.get("created_at") or 0
+                hours_passed = max(0, (current_time - float(fresh_at)) / 3600)
                 recency_score = DECAY_RATE**hours_passed
 
-                importance_score = mem.get("importance", 0.5)
+                importance_score = float(mem.get("importance") or 0.5)
+                importance_score = max(0, min(1, importance_score)) if math.isfinite(importance_score) else 0.5
 
                 final_score = (
                     alpha * semantic_score
                     + beta * recency_score
                     + gamma * importance_score
-                ) * type_weight
+                )
 
                 scored_memories.append((mem, final_score))
 
@@ -423,91 +465,79 @@ class MemoryManager:
                     "content": mem.get("content"),
                     "last_access_at": mem.get("last_access_at"),
                     "summary_id": mem.get("summary_id"),
+                    "relevance": mem.get("score"),
+                    "memory_key": mem.get("memory_key", ""),
+                    "source_message_ids": mem.get("source_message_ids", []),
+                    "evidence_kind": mem.get("evidence_kind", "legacy"),
                 }
                 for mem, _ in scored_memories[:top_k]
             ]
 
         return result
 
-    async def resolve_conflicts(self, filtered_memory: dict, user_id: int) -> dict:
-        """检测并删除重复记忆"""
-        items = []
+    async def get_memory_attribute_keys(self, user_id: int, tenant_id: str = "default") -> list:
+        """Supply scoped attribute names so extraction does not rename an existing fact."""
+        scope = memory_scope_user_id(user_id, tenant_id)
+        rows = await self.client.query(
+            collection_name=self.collection_name,
+            filter=f'user_id == {scope} and memory_key != "" and status == "active"',
+            output_fields=["memory_key", "content", "status"], limit=1000,
+            consistency_level="Strong",
+        )
+        if len(rows) >= 1000:
+            raise RuntimeError("memory_attribute_inventory_limit")
+        keys = {}
+        for row in rows:
+            key = row.get("memory_key")
+            if key and row.get("status", "active") == "active":
+                keys[key] = str(row.get("content", ""))[:400]
+        return [{"memory_key": k, "content": v} for k, v in sorted(keys.items())]
 
-        for key in ["semantic_memory", "episodic_memory", "procedural_memory"]:
-            for idx, mem in enumerate(filtered_memory.get(key, [])):
-                items.append((key, idx, mem["content"], key.replace("_memory", "")))
+    async def resolve_conflicts(
+        self, filtered_memory: dict, user_id: int, tenant_id: str = "default"
+    ) -> dict:
+        """Exact duplicates are skipped; keyed user evidence supersedes old versions.
 
-        if filtered_memory.get("summary"):
-            items.append(
-                ("summary", None, filtered_memory["summary"]["content"], "summary")
-            )
-
-        if not items:
-            return filtered_memory
-
-        vectors = await self.embeddings.aembed_documents([item[2] for item in items])
-
-        from collections import defaultdict
-
-        type_to_items = defaultdict(list)
-        type_to_vectors = defaultdict(list)
-
-        for item, vec in zip(items, vectors):
-            mem_type = item[3]
-            type_to_items[mem_type].append(item)
-            type_to_vectors[mem_type].append(vec)
-
-        async def search_type(mem_type, type_items, type_vectors):
-            filter_expr = f"user_id == {user_id} and memory_type == '{mem_type}'"
-            results = await self.client.search(
-                collection_name=self.collection_name,
-                data=type_vectors,
-                anns_field="vector",
-                search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-                limit=1,
-                filter=filter_expr,
-                output_fields=["distance"],
-            )
-            return [
-                results and results[i] and results[i][0]["distance"] >= 0.9
-                for i in range(len(type_items))
-            ]
-
-        tasks = [
-            search_type(t, type_to_items[t], type_to_vectors[t]) for t in type_to_items
-        ]
-        all_results = await asyncio.gather(*tasks)
-
-        is_similar_list = []
-        for results in all_results:
-            is_similar_list.extend(results)
-
-        to_remove = {
-            "semantic_memory": [],
-            "episodic_memory": [],
-            "procedural_memory": [],
-        }
-        clear_summary = False
-
-        for (key, idx, _, _), is_similar in zip(items, is_similar_list):
-            if not is_similar:
-                continue
-            if key == "summary":
-                clear_summary = True
-            elif idx is not None:
-                to_remove[key].append(idx)
-
-        for key, indices in to_remove.items():
-            if indices:
-                memories = filtered_memory[key]
-                for idx in sorted(indices, reverse=True):
-                    if idx < len(memories):
-                        del memories[idx]
-
-        if clear_summary:
-            filtered_memory["summary"] = {}
-
-        return filtered_memory
+        Similarity alone is never a reason to delete a new fact. This method
+        creates a write plan only; retirement happens after the new row exists.
+        The caller must hold the user-scoped ingestion lock until acknowledgement.
+        """
+        scoped_user_id = memory_scope_user_id(user_id, tenant_id)
+        planned = {"summary": dict(filtered_memory.get("summary") or {})}
+        for field in ("semantic_memory", "episodic_memory", "procedural_memory"):
+            kind = field.replace("_memory", "")
+            kept = []
+            # Collapse repeated keyed candidates within a batch; newest wins.
+            items = filtered_memory.get(field, [])
+            last = {m.get("memory_key"): i for i, m in enumerate(items) if m.get("memory_key")}
+            seen = set()
+            for index, original in enumerate(items):
+                item = dict(original)
+                key = item.get("memory_key", "")
+                digest = content_hash(item["content"])
+                if digest in seen or key and last[key] != index:
+                    continue
+                seen.add(digest)
+                expr = f"user_id == {scoped_user_id} and memory_type == {json.dumps(kind)}"
+                if key:
+                    expr += f" and memory_key == {json.dumps(key)}"
+                else:
+                    expr += f" and content_hash == {json.dumps(digest)}"
+                existing = await self.client.query(
+                    collection_name=self.collection_name, filter=expr,
+                    output_fields=["*"], limit=1000, consistency_level="Strong",
+                )
+                if len(existing) >= 1000:
+                    raise RuntimeError("记忆版本数量超过安全处理上限")
+                active = [m for m in existing if m.get("status", "active") == "active"]
+                if any(content_hash(m.get("content", "")) == digest for m in active):
+                    continue
+                if key and item.get("evidence_kind") == "user_quote":
+                    item["supersede_ids"] = [m["id"] for m in active]
+                    item["version"] = max((int(m.get("version", 1)) for m in existing), default=0) + 1
+                kept.append(item)
+            planned[field] = kept
+        return planned
 
     async def add_memories_batch(
         self,
@@ -518,8 +548,10 @@ class MemoryManager:
         **kwargs,
     ) -> bool:
         """批量添加记忆到 Milvus 集合"""
+        scoped_user_id = memory_scope_user_id(user_id, kwargs.get("tenant_id", "default"))
         created_at = kwargs.get("created_at", int(time.time()))
         last_access_at = kwargs.get("last_access_at", int(time.time()))
+        ingestion_batch = str(kwargs.get("batch_id", summary_id or ""))
 
         texts_to_embed = []
         records_to_insert = []
@@ -530,7 +562,7 @@ class MemoryManager:
             texts_to_embed.append(content)
             records_to_insert.append(
                 {
-                    "user_id": user_id,
+                    "user_id": scoped_user_id,
                     "thread_id": thread_id,
                     "memory_type": "summary",
                     "content": content,
@@ -538,6 +570,13 @@ class MemoryManager:
                     "importance": float(summary.get("importance_score", 0.5)),
                     "created_at": created_at,
                     "last_access_at": last_access_at,
+                    "source_message_ids": kwargs.get("source_message_ids", []),
+                    "status": "active",
+                    "updated_at": created_at,
+                    "version": 1,
+                    "memory_key": "",
+                    "evidence_kind": "summary",
+                    "supersede_ids": [],
                 }
             )
 
@@ -559,31 +598,69 @@ class MemoryManager:
                         texts_to_embed.append(content)
                         records_to_insert.append(
                             {
-                                "user_id": user_id,
+                                "user_id": scoped_user_id,
                                 "thread_id": thread_id,
                                 "memory_type": memory_type,
                                 "content": content,
-                                "summary_id": None,
+                                "summary_id": summary_id,
                                 "importance": float(item.get("importance_score", 0.5)),
                                 "created_at": created_at,
                                 "last_access_at": last_access_at,
+                                "updated_at": created_at,
+                                "status": "active",
+                                "version": int(item.get("version", 1)),
+                                "memory_key": item.get("memory_key", ""),
+                                "evidence_kind": item.get("evidence_kind", "unverified"),
+                                "source_message_ids": item.get("source_message_ids", []),
+                                "source_quote": item.get("source_quote", ""),
+                                "supersede_ids": item.get("supersede_ids", []),
                             }
                         )
 
         if not texts_to_embed:
             logger.warning("没有有效内容需要插入")
-            return False
+            return True  # An exact-duplicate-only batch is successfully processed.
 
         vectors = await self.embeddings.aembed_documents(texts_to_embed)
+        if len(vectors) != len(records_to_insert) or any(
+            len(v) != self.dense_dim or not all(math.isfinite(float(x)) for x in v) for v in vectors
+        ):
+            raise ValueError("Embedding条数或维度与记忆集合不一致")
 
         for record, vector in zip(records_to_insert, vectors):
             record["vector"] = vector
 
         try:
-            await self.client.insert(
-                collection_name=self.collection_name,
-                data=records_to_insert,
-            )
+            for record in records_to_insert:
+                record["content_hash"] = content_hash(record["content"])
+                scope = f"{scoped_user_id}:{thread_id}:{ingestion_batch}:{record['memory_type']}:{record['content_hash']}"
+                record["ingestion_key"] = hashlib.sha256(scope.encode()).hexdigest()
+                existing = await self.client.query(
+                    collection_name=self.collection_name,
+                    filter=f"user_id == {scoped_user_id} and ingestion_key == {json.dumps(record['ingestion_key'])}",
+                    output_fields=["id"], limit=1, consistency_level="Strong",
+                )
+                supersede = record.pop("supersede_ids", [])
+                if not existing:
+                    await self.client.insert(collection_name=self.collection_name, data=[record])
+                # Retire only after insertion; retry repeats this idempotent step.
+                if supersede:
+                    # Re-resolve physical IDs on every retry: auto-ID merge can
+                    # change IDs. Only older active versions may be retired.
+                    older = await self.client.query(
+                        collection_name=self.collection_name,
+                        filter=f"user_id == {scoped_user_id} and memory_type == {json.dumps(record['memory_type'])}"
+                               f" and memory_key == {json.dumps(record['memory_key'])}",
+                        output_fields=["id", "status", "version"], limit=1000,
+                        consistency_level="Strong",
+                    )
+                    if len(older) >= 1000:
+                        raise RuntimeError("memory_retirement_inventory_limit")
+                    changes = [{"id": int(row["id"]), "status": "superseded", "superseded_by": record["ingestion_key"]}
+                               for row in older if row.get("status", "active") == "active"
+                               and int(row.get("version", 1)) < record["version"]]
+                    if changes:
+                        await self.client.upsert(collection_name=self.collection_name, data=changes, partial_update=True)
             logger.info(
                 f"批量添加记忆完成 - 总计：{len(records_to_insert)} 条，"
                 f"用户：{user_id}, 会话：{thread_id}, summary_id: {summary_id}"
@@ -592,6 +669,23 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"批量插入记忆失败：{e}")
             raise
+
+    async def delete_session_memories(
+        self, user_id: int, tenant_id: str, thread_id: str
+    ) -> int:
+        """Remove memories derived from one authenticated session."""
+        if not thread_id or len(thread_id) > 50 or not all(
+            char.isalnum() or char in "_-" for char in thread_id
+        ):
+            raise ValueError("会话标识无效")
+        scoped_user_id = memory_scope_user_id(user_id, tenant_id)
+        result = await self.client.delete(
+            collection_name=self.collection_name,
+            filter=f'user_id == {scoped_user_id} and thread_id == "{thread_id}"',
+        )
+        if isinstance(result, dict):
+            return int(result.get("delete_count", 0) or 0)
+        return 0
 
 
 async def test_update_access_time():

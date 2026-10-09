@@ -14,7 +14,7 @@ import os
 import json
 import time
 import logging
-from typing import Dict, List, Optional, Set, Callable
+from typing import Any, Dict, List, Optional, Set, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
@@ -265,6 +265,52 @@ def get_access_controller() -> AccessController:
     return _acl_controller
 
 
+def get_request_identity(request: Request) -> Dict[str, Any]:
+    """Read identity from trusted middleware, with an explicit local-demo opt-in.
+
+    Client-supplied role headers are not an authentication mechanism. They are
+    ignored unless NEXUSMIND_ALLOW_HEADER_IDENTITY is explicitly enabled for a
+    local demo environment.
+    """
+    principal = getattr(request.state, "user", None)
+    if principal is None:
+        scope_user = request.scope.get("user") if hasattr(request, "scope") else None
+        if scope_user is not None and getattr(scope_user, "is_authenticated", False):
+            principal = scope_user
+
+    if principal is None:
+        allow_demo_headers = os.getenv(
+            "NEXUSMIND_ALLOW_HEADER_IDENTITY", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if not allow_demo_headers:
+            return {"user_id": 0, "role": UserRole.GUEST, "tenant_id": "default"}
+        raw_user_id = request.headers.get("X-User-Id", "0")
+        raw_role = request.headers.get("X-User-Role", UserRole.GUEST.value)
+        tenant_id = request.headers.get("X-Tenant-Id", "default")
+    elif isinstance(principal, dict):
+        raw_user_id = principal.get("user_id", principal.get("id"))
+        raw_role = principal.get("role", UserRole.GUEST.value)
+        tenant_id = principal.get("tenant_id", "default")
+    else:
+        raw_user_id = getattr(principal, "user_id", getattr(principal, "id", None))
+        raw_role = getattr(principal, "role", UserRole.GUEST.value)
+        tenant_id = getattr(principal, "tenant_id", "default")
+
+    try:
+        user_id = int(raw_user_id)
+        if user_id < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的用户身份")
+
+    try:
+        user_role = raw_role if isinstance(raw_role, UserRole) else UserRole(str(raw_role).lower())
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的用户角色")
+
+    return {"user_id": user_id, "role": user_role, "tenant_id": str(tenant_id or "default")}
+
+
 # ==================== FastAPI 装饰器 ====================
 
 def require_permission(permission: Permission):
@@ -280,26 +326,15 @@ def require_permission(permission: Permission):
             ...
     """
     async def dependency(request: Request):
-        # 从请求头或查询参数获取用户角色
-        # 实际生产环境应从 JWT token / session 中解析
-        role_header = request.headers.get("X-User-Role", "guest")
-        user_id_header = request.headers.get("X-User-Id", "0")
-        try:
-            user_id = int(user_id_header)
-        except ValueError:
-            user_id = 0
-
-        user_role = UserRole(role_header.lower())
+        identity = get_request_identity(request)
+        user_role = identity["role"]
         acl = get_access_controller()
 
         # 检查权限
         acl.check_permission(user_role, permission)
 
         # 返回用户信息供后续使用
-        return {
-            "user_id": user_id,
-            "role": user_role,
-        }
+        return identity
 
     return dependency
 

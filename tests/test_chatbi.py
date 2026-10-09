@@ -16,8 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from chatbi.semantic_layer import (
+    ALL_METRICS,
     COMPOSITE_METRIC_PLANS,
+    EXTRA_METRIC_ALIASES,
     MetricPlanCompiler,
+    load_semantic_registry,
     match_composite_plan_by_query,
     match_metrics_by_query,
 )
@@ -26,6 +29,7 @@ from chatbi.sql_guard import ResultSanityChecker, SQLValidator
 from chatbi.field_eval import field_level_eval, execute_sql
 from chatbi.data_quality import DataQualityAgent
 from chatbi.root_cause import is_root_cause_query
+from core.intent_recognition import RuleRecognizer
 from chatbi.ast_validator import ASTSQLValidator
 from chatbi.hybrid_knowledge import HybridKnowledgeRetriever
 from chatbi.text2sql_pipeline import SemanticCompilerRouter
@@ -62,6 +66,27 @@ class SemanticLayerTests(unittest.TestCase):
             match_metrics_by_query("按州统计订单量和销售额"),
             ["sales_revenue", "order_count"],
         )
+
+    def test_english_aliases_in_governed_schema(self):
+        self.assertEqual(match_metrics_by_query("sales revenue by customer state"), ["sales_revenue"])
+        linked = SemanticCompilerRouter().linker.link("sales revenue by customer state")
+        self.assertIn("customer_state", linked.dimensions)
+        self.assertEqual(linked.route, "semantic_compile")
+
+    def test_declarative_metric_compiles_without_code_edit(self):
+        registry = PROJECT_ROOT / "docs" / "knowledge" / "semantic_registry.example.json"
+        load_semantic_registry(str(registry))
+        try:
+            out = SemanticCompilerRouter().compile_if_supported("按客户州统计运费总额")
+            self.assertTrue(out["compiled"], out["ir"]["reasons"])
+            self.assertIn("freight_value", out["sql"])
+            self.assertEqual(SQLValidator().validate(out["sql"]), [])
+            result = json.loads(execute_sql_raw(out["sql"]))
+            self.assertNotIn("error", result)
+            self.assertGreater(result["row_count"], 0)
+        finally:
+            ALL_METRICS.pop("shipping_fee_total", None)
+            EXTRA_METRIC_ALIASES.pop("shipping_fee_total", None)
 
 
 class SchemaRetrievalTests(unittest.TestCase):
@@ -353,6 +378,8 @@ class CompositeMetricPlanTests(unittest.TestCase):
 class RootCauseAndQualityTests(unittest.TestCase):
     def test_root_cause_intent_detection(self):
         self.assertTrue(is_root_cause_query("为什么 11 月销售额暴增？"))
+        self.assertTrue(is_root_cause_query("为什么 A 比 B 少？"))
+        self.assertEqual(RuleRecognizer().recognize("为什么 A 比 B 少？").intent, "root_cause")
         self.assertTrue(is_root_cause_query("请对数据质量做对账"))
         self.assertFalse(is_root_cause_query("各州订单量是多少？"))
 

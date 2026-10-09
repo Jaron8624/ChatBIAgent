@@ -4,7 +4,9 @@
 采用本地 append-only 文件，开发环境零外部依赖；可由 OpenTelemetry/Langfuse exporter 替换。
 """
 
+import asyncio
 import json
+import logging
 import os
 import random
 import re
@@ -14,6 +16,7 @@ from typing import Any, Dict, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR = PROJECT_ROOT / "data" / "observability"
+logger = logging.getLogger(__name__)
 
 
 class TraceStore:
@@ -48,11 +51,18 @@ class TraceStore:
         text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", text)
         return text
 
-    def record_trace(self, result: Dict[str, Any], query: str, session_id: str, user_id: Any) -> Dict[str, Any]:
+    def record_trace(
+        self,
+        result: Dict[str, Any],
+        query: str,
+        session_id: str,
+        user_id: Any,
+        tenant_id: str = "",
+    ) -> Dict[str, Any]:
         status = "error" if result.get("error_info") else "ok"
         record = {
             "trace_id": result.get("trace_id", ""), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "session_id": session_id, "user_id": str(user_id), "query": query[:2000],
+            "session_id": session_id, "user_id": str(user_id), "tenant_id": str(tenant_id or ""), "query": query[:2000],
             "response": result.get("final_response", "")[:4000], "intent": result.get("intent"),
             "route": result.get("compile_status") or ("root_cause" if result.get("rca_result") else "agent"),
             "schema_linking": result.get("schema_linking"), "metric_plan": result.get("metric_plan"),
@@ -65,6 +75,72 @@ class TraceStore:
         self._append(self.trace_path, safe_record)
         return safe_record
 
+    @staticmethod
+    def _persist_harness_records(
+        trace: Optional[Dict[str, Any]] = None,
+        bad_case: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """把本地已落盘的记录同步到 Harness；由后台线程调用。"""
+        from harness.service import get_harness_service
+
+        store = get_harness_service().store
+        if trace is not None:
+            store.add_observability_event({
+                "trace_id": trace.get("trace_id"),
+                "tenant_id": trace.get("tenant_id", ""),
+                "release_mode": trace.get("release_mode", "baseline"),
+                "status": trace.get("status", "ok"),
+                "latency_ms": trace.get("latency_ms", 0),
+                "tokens": trace.get("tokens_consumed", 0),
+                "cost": trace.get("estimated_cost", 0),
+                "payload": trace,
+                "created_at": trace.get("timestamp"),
+            })
+        if bad_case is not None:
+            store.add_bad_case({
+                "bad_case_id": bad_case.get("trace_id") or None,
+                "source": f"online:{bad_case.get('reason', 'unknown')}",
+                "query": bad_case.get("query", ""),
+                "response": bad_case.get("response", ""),
+                "context": "",
+                "overall_score": 0.0,
+                "dimensions": [],
+                "evaluation_status": "success",
+                # Random traffic is a review sample, not automatically a
+                # quality failure. Only errors/slow/retry traces enter the
+                # Bad Case evolution queue immediately.
+                "processing_status": (
+                    "needs_evaluation"
+                    if bad_case.get("reason") == "random_sample"
+                    else "new"
+                ),
+                "created_at": bad_case.get("timestamp"),
+            })
+
+    async def persist_harness_records(
+        self,
+        trace: Optional[Dict[str, Any]] = None,
+        bad_case: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist secondary Harness records off the event loop with a timeout."""
+        if trace is None and bad_case is None:
+            return
+        try:
+            timeout_seconds = max(
+                0.1, float(os.getenv("HARNESS_OBSERVABILITY_WRITE_TIMEOUT_SECONDS", "3"))
+            )
+        except ValueError:
+            timeout_seconds = 3.0
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._persist_harness_records, trace, bad_case),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Harness 观测写入超过 %.1f 秒，本地 JSONL 已保留", timeout_seconds)
+        except Exception as exc:
+            logger.warning("Harness 观测写入失败，本地 JSONL 已保留: %s", exc)
+
     def should_sample(self, trace: Dict[str, Any]) -> Optional[str]:
         if trace["status"] != "ok":
             return "execution_error"
@@ -75,7 +151,9 @@ class TraceStore:
         rate = float(os.getenv("ONLINE_EVAL_SAMPLE_RATE", "0.1"))
         return "random_sample" if random.random() < rate else None
 
-    def record_online_bad_case(self, trace: Dict[str, Any], reason: str, feedback: Optional[bool] = None) -> None:
+    def record_online_bad_case(
+        self, trace: Dict[str, Any], reason: str, feedback: Optional[bool] = None
+    ) -> Dict[str, Any]:
         payload = self._redact({
             "trace_id": trace.get("trace_id", ""), "session_id": trace.get("session_id", ""),
             "query": trace.get("query", ""), "response": trace.get("response", ""),
@@ -83,31 +161,20 @@ class TraceStore:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
         self._append(self.badcase_path, payload)
-        try:
-            from harness.service import get_harness_service
-            get_harness_service().store.add_bad_case({
-                "bad_case_id": payload.get("trace_id") or None,
-                "source": f"online:{reason}",
-                "query": payload.get("query", ""),
-                "response": payload.get("response", ""),
-                "context": "",
-                "overall_score": 0.0,
-                "dimensions": [],
-                "evaluation_status": "success",
-                # Random traffic is a review sample, not automatically a
-                # quality failure. Only errors/slow/retry traces enter the Bad
-                # Case evolution queue immediately.
-                "processing_status": "needs_evaluation" if reason == "random_sample" else "new",
-                "created_at": payload.get("timestamp"),
-            })
-        except Exception as exc:
-            logger.warning(f"线上 Bad Case 写入 Harness 失败: {exc}")
+        payload["reason"] = reason
+        return payload
 
 
-async def archive_and_sample(result: Dict[str, Any], query: str, session_id: str, user_id: Any) -> None:
+async def archive_and_sample(
+    result: Dict[str, Any],
+    query: str,
+    session_id: str,
+    user_id: Any,
+    tenant_id: str = "",
+) -> None:
     """非阻塞后台任务：落 trace，异常或随机采样落线上 Bad Case。"""
     store = TraceStore()
-    trace = store.record_trace(result, query, session_id, user_id)
+    trace = store.record_trace(result, query, session_id, user_id, tenant_id=tenant_id)
     reason = store.should_sample(trace)
-    if reason:
-        store.record_online_bad_case(trace, reason)
+    bad_case = store.record_online_bad_case(trace, reason) if reason else None
+    await store.persist_harness_records(trace, bad_case)

@@ -12,6 +12,9 @@ from .models import (
     Score,
 )
 from .store import HarnessStore
+from .preflight import PreflightChecker, PreflightReport
+from .release import RBACAuthorizer, ReleaseController
+from .runtime import HarnessRuntime, RuntimeRelease, get_harness_runtime
 
 __all__ = [
     "CandidateSpec",
@@ -23,6 +26,12 @@ __all__ = [
     "GateEngine",
     "GatePolicy",
     "HarnessStore",
+    "PreflightChecker",
+    "PreflightReport",
+    "RBACAuthorizer",
+    "ReleaseController",
+    "HarnessRuntime",
+    "RuntimeRelease",
+    "get_harness_runtime",
     "Score",
 ]
-

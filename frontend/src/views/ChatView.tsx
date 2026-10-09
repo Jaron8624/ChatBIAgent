@@ -43,6 +43,11 @@ interface ChatMsg {
   chartOption?: Record<string, unknown>
 }
 
+interface SessionResumePayload {
+  session_id: string
+  messages: { role: string; content: string }[]
+}
+
 const HELP_CARDS = [
   { title: '趋势分析', quote: '最近三个月各品类的销售额是多少？' },
   { title: '对比分析', quote: '11月和2月的订单量对比，为什么差异这么大？' },
@@ -396,11 +401,23 @@ function MessageBubble({ msg, onFeedback }: { msg: ChatMsg; onFeedback?: (satisf
   )
 }
 
-export default function ChatView() {
-  const [messages, setMessages] = useState<ChatMsg[]>([])
+export default function ChatView({
+  initialSession,
+  onInitialSessionLoaded,
+}: {
+  initialSession?: SessionResumePayload | null
+  onInitialSessionLoaded?: () => void
+} = {}) {
+  const [messages, setMessages] = useState<ChatMsg[]>(() =>
+    (initialSession?.messages || [])
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .map((message) => ({ role: message.role as ChatMsg['role'], content: message.content })),
+  )
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [sessionId, setSessionId] = useState(`web-${Date.now()}`)
+  const [sessionId, setSessionId] = useState(() =>
+    initialSession?.session_id || localStorage.getItem('nexusmind.activeSessionId') || `web-${Date.now()}`,
+  )
   const [kbList, setKbList] = useState<{ knowledge_bases: { knowledge_base_id: string }[] } | null>(null)
   const [kbId, setKbId] = useState('默认知识库')
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -421,6 +438,41 @@ export default function ChatView() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    if (initialSession) {
+      setSessionId(initialSession.session_id)
+      setMessages(
+        initialSession.messages
+          .filter((message) => message.role === 'user' || message.role === 'assistant')
+          .map((message) => ({ role: message.role as ChatMsg['role'], content: message.content })),
+      )
+      localStorage.setItem('nexusmind.activeSessionId', initialSession.session_id)
+      onInitialSessionLoaded?.()
+      return
+    }
+    if (busy || sessionId.startsWith('web-')) return
+    let current = true
+    api
+      .post<SessionResumePayload>('/session/resume', { session_id: sessionId })
+      .then((session) => {
+        if (!current) return
+        setMessages(
+          session.messages
+            .filter((message) => message.role === 'user' || message.role === 'assistant')
+            .map((message) => ({ role: message.role as ChatMsg['role'], content: message.content })),
+        )
+      })
+      .catch(() => {
+        if (!current) return
+        localStorage.removeItem('nexusmind.activeSessionId')
+        setSessionId(`web-${Date.now()}`)
+        setMessages([])
+      })
+    return () => {
+      current = false
+    }
+  }, [initialSession, onInitialSessionLoaded, busy, sessionId])
 
   const send = async (text?: string) => {
     const query = (text ?? input).trim()
@@ -509,8 +561,16 @@ export default function ChatView() {
           if (evt.type === 'trace' && evt.spans) {
             traceSpans = (evt.spans as unknown) as TraceSpan[]
           }
+          if (evt.type === 'session' && evt.session_id) {
+            setSessionId(evt.session_id)
+            localStorage.setItem('nexusmind.activeSessionId', evt.session_id)
+          }
           if (evt.type === 'finished') {
             latency = evt.latency_ms || 0
+            if (evt.session_id) {
+              setSessionId(evt.session_id)
+              localStorage.setItem('nexusmind.activeSessionId', evt.session_id)
+            }
           }
           if (evt.type === 'error') {
             answer += `\n❌ ${evt.content || '未知错误'}`
@@ -631,6 +691,7 @@ export default function ChatView() {
             abortRef.current = null
             setMessages([])
             setSessionId(`web-${Date.now()}`)
+            localStorage.removeItem('nexusmind.activeSessionId')
             setBusy(false)
           }}
         >

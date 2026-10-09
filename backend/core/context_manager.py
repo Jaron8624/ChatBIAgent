@@ -15,6 +15,7 @@ Bear Agent 对应能力："上下文长度管理"
 import os
 import re
 import logging
+from functools import lru_cache
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_RESULT_BUDGET = int(os.getenv("TOOL_RESULT_BUDGET", "3000"))
 # 单条工具结果的最大 token
 DEFAULT_SINGLE_TOOL_MAX = int(os.getenv("SINGLE_TOOL_MAX", "1500"))
+SYNTHESIS_INPUT_BUDGET = int(os.getenv("SYNTHESIS_INPUT_BUDGET", "12000"))
+SYNTHESIS_CONTEXT_WINDOW = int(os.getenv("SYNTHESIS_CONTEXT_WINDOW_TOKENS", "16384"))
+SYNTHESIS_OUTPUT_BUDGET = int(os.getenv("SYNTHESIS_OUTPUT_TOKENS", "2048"))
+
+
+def get_synthesis_input_budget() -> int:
+    if SYNTHESIS_CONTEXT_WINDOW <= SYNTHESIS_OUTPUT_BUDGET:
+        raise ValueError("上下文窗口配置必须大于输出 Token 预留")
+    return min(SYNTHESIS_INPUT_BUDGET, SYNTHESIS_CONTEXT_WINDOW - SYNTHESIS_OUTPUT_BUDGET)
+
+
+@lru_cache(maxsize=1)
+def _encoding():
+    try:
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    except ImportError:
+        return None
 
 
 class ToolResultTruncator:
@@ -48,21 +67,14 @@ class ToolResultTruncator:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         """
-        混合文本 token 估算
-        - 中文/日文/韩文：≈ 1 token / 字符
-        - 英文单词：≈ 1 token / 词
-        - 数字/标点：≈ 0.5 token / 字符
-        - 加上 10 token 固定开销（角色、格式等）
+        Token 预算估算。cl100k 是本地代理估算，不等同于供应商实际计费；
+        加 20% 余量。没有 tiktoken 时用 UTF-8 字节数保守估算。
         """
         if not text:
             return 0
-        # 中文字符
-        cjk = len(re.findall(r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]", text))
-        # 英文单词
-        words = len(re.findall(r"[a-zA-Z]+", text))
-        # 其他字符（数字、标点、空格）
-        others = len(text) - cjk - sum(len(w) for w in re.findall(r"[a-zA-Z]+", text))
-        return cjk + words + others // 2 + 10
+        encoding = _encoding()
+        count = len(encoding.encode(text)) if encoding else len(text.encode("utf-8"))
+        return int(count * 1.2) + 10
 
     # ==================== 单条截断 ====================
 
@@ -117,6 +129,12 @@ class ToolResultTruncator:
             f"保留前 {kept_lines} 行 / {self.estimate_tokens(result)} tokens"
             f"{recall_hint}]"
         )
+        while result and self.estimate_tokens(result + placeholder) > max_tokens:
+            result = result[:max(0, len(result) - max(1, len(result) // 8))]
+        if self.estimate_tokens(placeholder) > max_tokens:
+            placeholder = f"[已截断，ref_id={ref_id}]" if recall_hint else "[已截断]"
+        if self.estimate_tokens(placeholder) > max_tokens:
+            raise ValueError("单条工具结果预算过小，无法保留引用")
         return result + placeholder
 
     def truncate_rag_result(self, text: str) -> str:
@@ -178,3 +196,22 @@ class ToolResultTruncator:
 # 全局单例
 def get_truncator() -> ToolResultTruncator:
     return ToolResultTruncator()
+
+
+def fit_prompt_context(prompt: str, context: str, budget: Optional[int] = None) -> str:
+    """Bound the complete synthesis input, including instructions and user query."""
+    budget = budget if budget is not None else get_synthesis_input_budget()
+    truncator = ToolResultTruncator()
+    if not context:
+        if truncator.estimate_tokens(prompt) > budget:
+            raise ValueError("回答上下文超过预算")
+        return prompt
+    fixed_tokens = truncator.estimate_tokens(prompt.replace(context, "", 1))
+    context_budget = budget - fixed_tokens - 64
+    if context_budget < 96:
+        raise ValueError("回答提示词本身超过上下文预算")
+    if truncator.estimate_tokens(context) > context_budget:
+        prompt = prompt.replace(context, truncator.truncate(context, context_budget), 1)
+    if truncator.estimate_tokens(prompt) > budget:
+        raise ValueError("回答上下文超过预算，拒绝发送给模型")
+    return prompt

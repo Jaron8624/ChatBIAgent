@@ -65,4 +65,6 @@ class ContextSchema:
     user_id: int
     knowledge_base_id: str
     top_k: int = 5
+    tenant_id: str = "default"
+    session_id: str = ""
 

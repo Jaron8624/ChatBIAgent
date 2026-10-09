@@ -57,7 +57,8 @@ async def get_raw_conversation_by_summary_id(
     raw_conversation = await postgresql_client.get_raw_conversation_by_summary_id(
         summary_id=summary_id,
         user_id=user_id,
-        thread_id=f"{user_id}"
+        tenant_id=runtime.context.tenant_id,
+        thread_id=runtime.context.session_id,
     )
     writer(f"🔍 原始对话检索完成，耗时{time.time() - start_time:.2f}秒")
     return raw_conversation
@@ -105,13 +106,16 @@ async def get_memory(
         semantic_k=semantic_k,
         episodic_k=episodic_k,
         procedural_k=procedural_k,
+        tenant_id=runtime.context.tenant_id,
     )
-    count = 1
+    count = 0
     for memory in memories_dict.values():
         if isinstance(memory, list):
             count += len(memory)
         
     writer(f"🔍 检索到{count}条记忆，耗时{time.time() - start_time:.2f}秒")
+    if count == 0:
+        return ""  # No candidates means no background-memory prompt injection.
     now = int(time.time())
     memories_text = config.MEMORY_USAGE_PROMPT.format(
         memories_dict=memories_dict,

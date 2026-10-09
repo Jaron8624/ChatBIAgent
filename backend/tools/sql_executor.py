@@ -21,6 +21,8 @@ import os
 import json
 import sqlite3
 import logging
+from contextlib import closing
+from pathlib import Path
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,37 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
 _OLIST_DB_PATH = os.path.join(_DATA_DIR, "olist.sqlite")
 _CHINOOK_DB_PATH = os.path.join(_DATA_DIR, "chinook.sqlite")
+
+
+def _read_only_uri(path: str) -> str:
+    """Build a safely encoded SQLite URI that opens a database read-only."""
+    return f"{Path(path).resolve().as_uri()}?mode=ro"
+
+
+def _readonly_authorizer(action, arg1, arg2, database_name, trigger_name):
+    """Block write, schema, attach, transaction, and pragma operations in SQLite."""
+    denied_names = (
+        "SQLITE_INSERT", "SQLITE_UPDATE", "SQLITE_DELETE",
+        "SQLITE_CREATE_INDEX", "SQLITE_CREATE_TABLE", "SQLITE_CREATE_TEMP_INDEX",
+        "SQLITE_CREATE_TEMP_TABLE", "SQLITE_CREATE_TEMP_TRIGGER", "SQLITE_CREATE_TEMP_VIEW",
+        "SQLITE_CREATE_TRIGGER", "SQLITE_CREATE_VIEW", "SQLITE_DROP_INDEX",
+        "SQLITE_DROP_TABLE", "SQLITE_DROP_TEMP_INDEX", "SQLITE_DROP_TEMP_TABLE",
+        "SQLITE_DROP_TEMP_TRIGGER", "SQLITE_DROP_TEMP_VIEW", "SQLITE_DROP_TRIGGER",
+        "SQLITE_DROP_VIEW", "SQLITE_ALTER_TABLE", "SQLITE_REINDEX", "SQLITE_ANALYZE",
+        "SQLITE_ATTACH", "SQLITE_DETACH", "SQLITE_TRANSACTION", "SQLITE_SAVEPOINT",
+        "SQLITE_PRAGMA", "SQLITE_CREATE_VTABLE", "SQLITE_DROP_VTABLE",
+    )
+    denied_actions = {getattr(sqlite3, name) for name in denied_names if hasattr(sqlite3, name)}
+    if action in denied_actions:
+        # The table-valued pragma is used only to display schema metadata.
+        if action == sqlite3.SQLITE_PRAGMA and str(arg1 or "").lower() == "table_info":
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+    if action == getattr(sqlite3, "SQLITE_FUNCTION", -1):
+        function_name = str(arg2 or arg1 or "").lower()
+        if function_name in {"load_extension", "readfile", "writefile"}:
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def _get_conn():
@@ -40,37 +73,26 @@ def _get_conn():
         raise FileNotFoundError(f"Olist 数据库不存在: {olist_path}")
 
     # 打开 Olist 为主库
-    conn = sqlite3.connect(olist_path)
+    conn = sqlite3.connect(_read_only_uri(olist_path), uri=True)
     conn.row_factory = sqlite3.Row
 
     # ATTACH Chinook 为附加库（只读）
     if os.path.exists(chinook_path):
-        conn.execute(f"ATTACH DATABASE '{chinook_path}' AS chinook")
+        conn.execute("ATTACH DATABASE ? AS chinook", (_read_only_uri(chinook_path),))
         logger.info("Chinook 数据库已 ATTACH 为 chinook schema")
     else:
         logger.warning(f"Chinook 数据库不存在，仅启用 Olist: {chinook_path}")
 
     # 引擎级只读：禁止任何写操作
     conn.execute("PRAGMA query_only = ON")
+    conn.set_authorizer(_readonly_authorizer)
 
     return conn
 
 
-# SQL 安全校验：第一道防线（关键字过滤），第二道是 PRAGMA query_only
-_FORBIDDEN_KEYWORDS = [
-    "insert", "update", "delete", "drop", "alter", "create",
-    "truncate", "replace", "detach", "pragma",
-    "attach database", "attach '", "attach \"",
-]
-
-
 def _validate_sql(sql: str) -> bool:
-    """校验 SQL 是否为只读查询"""
-    lower = sql.strip().lower()
-    for kw in _FORBIDDEN_KEYWORDS:
-        if kw in lower:
-            return False
-    return True
+    """Reject empty input; SQLite's authorizer enforces read-only execution."""
+    return isinstance(sql, str) and bool(sql.strip())
 
 
 def _normalize_value(v):
@@ -93,18 +115,18 @@ def execute_sql(sql: str) -> str:
         return json.dumps({"error": "仅支持 SELECT 查询，禁止写操作"}, ensure_ascii=False)
 
     try:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        data = [[_normalize_value(v) for v in row] for row in rows]
+        with closing(_get_conn()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            data = [[_normalize_value(v) for v in row] for row in rows]
+            cursor.close()
         result = {
             "columns": columns,
             "rows": data,
             "row_count": len(data),
         }
-        conn.close()
         return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as e:
         return json.dumps({"error": f"SQL 执行失败: {e}", "sql": sql[:200]}, ensure_ascii=False)
@@ -118,48 +140,19 @@ def get_table_schema() -> str:
     - chinook: 数字媒体数据集（Artist, Album, Track, Invoice, Customer...）
     """
     try:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        schema_info = {}
+        with closing(_get_conn()) as conn:
+            cursor = conn.cursor()
+            schema_info = {}
 
-        # ---- Olist 表（主库）----
-        cursor.execute(
-            "SELECT name, sql FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        )
-        olist_tables = cursor.fetchall()
-
-        for table_name, create_sql in olist_tables:
-            cursor.execute(f"SELECT * FROM pragma_table_info('{table_name}')")
-            columns_info = cursor.fetchall()
-            columns = []
-            for col in columns_info:
-                columns.append({
-                    "name": col[1],
-                    "type": col[2],
-                    "notnull": bool(col[3]),
-                    "default": col[4],
-                    "pk": bool(col[5]),
-                })
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            row_count = cursor.fetchone()[0]
-            schema_info[f"olist.{table_name}"] = {
-                "database": "Olist 巴西电商",
-                "columns": columns,
-                "row_count": row_count,
-                "create_sql": create_sql,
-            }
-
-        # ---- Chinook 表（附加库）----
-        try:
+            # ---- Olist 表（主库）----
             cursor.execute(
-                "SELECT name, sql FROM chinook.sqlite_master "
+                "SELECT name, sql FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
-            chinook_tables = cursor.fetchall()
+            olist_tables = cursor.fetchall()
 
-            for table_name, create_sql in chinook_tables:
-                cursor.execute(f"SELECT * FROM chinook.pragma_table_info('{table_name}')")
+            for table_name, create_sql in olist_tables:
+                cursor.execute(f"SELECT * FROM pragma_table_info('{table_name}')")
                 columns_info = cursor.fetchall()
                 columns = []
                 for col in columns_info:
@@ -170,18 +163,46 @@ def get_table_schema() -> str:
                         "default": col[4],
                         "pk": bool(col[5]),
                     })
-                cursor.execute(f"SELECT COUNT(*) FROM chinook.{table_name}")
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
                 row_count = cursor.fetchone()[0]
-                schema_info[f"chinook.{table_name}"] = {
-                    "database": "Chinook 数字媒体",
+                schema_info[f"olist.{table_name}"] = {
+                    "database": "Olist 巴西电商",
                     "columns": columns,
                     "row_count": row_count,
                     "create_sql": create_sql,
                 }
-        except sqlite3.OperationalError:
-            logger.warning("Chinook 数据库未 ATTACH，跳过其表结构")
+            # ---- Chinook 表（附加库）----
+            try:
+                cursor.execute(
+                    "SELECT name, sql FROM chinook.sqlite_master "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+                chinook_tables = cursor.fetchall()
 
-        conn.close()
+                for table_name, create_sql in chinook_tables:
+                    cursor.execute(f"SELECT * FROM chinook.pragma_table_info('{table_name}')")
+                    columns_info = cursor.fetchall()
+                    columns = []
+                    for col in columns_info:
+                        columns.append({
+                            "name": col[1],
+                            "type": col[2],
+                            "notnull": bool(col[3]),
+                            "default": col[4],
+                            "pk": bool(col[5]),
+                        })
+                    cursor.execute(f"SELECT COUNT(*) FROM chinook.{table_name}")
+                    row_count = cursor.fetchone()[0]
+                    schema_info[f"chinook.{table_name}"] = {
+                        "database": "Chinook 数字媒体",
+                        "columns": columns,
+                        "row_count": row_count,
+                        "create_sql": create_sql,
+                    }
+            except sqlite3.OperationalError:
+                logger.warning("Chinook 数据库未 ATTACH，跳过其表结构")
+            cursor.close()
+
         return json.dumps(schema_info, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": f"获取表结构失败: {e}"}, ensure_ascii=False)

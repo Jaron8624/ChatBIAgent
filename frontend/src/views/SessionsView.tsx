@@ -8,6 +8,8 @@ interface SessionItem {
   token_count: number
   updated_at: string
   message_count: number
+  run_status?: string
+  recoverable?: boolean
 }
 
 interface ResumedMsg {
@@ -15,7 +17,11 @@ interface ResumedMsg {
   content: string
 }
 
-export default function SessionsView() {
+export default function SessionsView({
+  onContinue,
+}: {
+  onContinue: (session: { session_id: string; messages: ResumedMsg[] }) => void
+}) {
   const [sessions, setSessions] = useState<SessionItem[] | null>(null)
   const [error, setError] = useState('')
   const [resumed, setResumed] = useState<{ session_id: string; messages: ResumedMsg[]; summary: string } | null>(null)
@@ -46,6 +52,27 @@ export default function SessionsView() {
     try {
       await api.del(`/session/${encodeURIComponent(sid)}`)
       if (resumed?.session_id === sid) setResumed(null)
+      load()
+    } catch (e) {
+      alert((e as Error).message)
+    }
+  }
+
+  const recover = async (sid: string) => {
+    try {
+      const result = await api.post<{ final_response: string }>(
+        '/session/recover',
+        { session_id: sid },
+      )
+      setResumed((previous) => {
+        if (!previous || previous.session_id !== sid) return previous
+        const last = previous.messages[previous.messages.length - 1]
+        if (last?.role === 'assistant' && last.content === result.final_response) return previous
+        return {
+          ...previous,
+          messages: [...previous.messages, { role: 'assistant', content: result.final_response }],
+        }
+      })
       load()
     } catch (e) {
       alert((e as Error).message)
@@ -86,6 +113,7 @@ export default function SessionsView() {
                 <code style={{ fontSize: 11.5, color: 'var(--accent)' }}>{s.session_id}</code>
                 <Tag color="gray">{s.message_count} 条消息</Tag>
                 <Tag color="blue">{s.token_count} tokens</Tag>
+                {(s.run_status === 'interrupted' || s.run_status === 'running') && <Tag color="yellow">待恢复</Tag>}
                 <span style={{ flex: 1 }} />
                 <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{fmtTime(s.updated_at)}</span>
               </div>
@@ -93,6 +121,17 @@ export default function SessionsView() {
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {s.summary || '（无摘要）'}
                 </span>
+                {s.recoverable && (
+                  <button
+                    className="btn small"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      recover(s.session_id)
+                    }}
+                  >
+                    恢复执行
+                  </button>
+                )}
                 <button
                   className="btn small danger"
                   onClick={(e) => {
@@ -161,6 +200,13 @@ export default function SessionsView() {
                 </div>
               ))}
             </div>
+            <button
+              className="btn small"
+              style={{ marginTop: 12 }}
+              onClick={() => onContinue(resumed)}
+            >
+              继续对话
+            </button>
           </>
         )}
       </Card>

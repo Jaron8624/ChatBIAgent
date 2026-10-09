@@ -19,7 +19,6 @@ export default function AuditView() {
   const [error, setError] = useState('')
 
   const load = () => {
-    setError('')
     const path = tab === 'audit' ? '/acl/audit-logs?limit=200' : '/acl/dangerous-logs?limit=100'
     api
       .get<{ logs: AuditLog[] }>(path)
@@ -40,7 +39,7 @@ export default function AuditView() {
     <div>
       <Card
         title={`当前身份：${getApiContext().role}`}
-        hint="角色权限由 ACL 控制（admin / operator / viewer / user / guest）"
+        hint="角色权限由 ACL 控制（admin / editor / viewer / guest）"
       >
         {perms ? (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -57,13 +56,13 @@ export default function AuditView() {
       </Card>
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        <button className={`btn ${tab === 'audit' ? 'primary' : ''}`} onClick={() => setTab('audit')}>
+        <button className={`btn ${tab === 'audit' ? 'primary' : ''}`} onClick={() => { setError(''); setTab('audit') }}>
           全部审计日志
         </button>
-        <button className={`btn ${tab === 'dangerous' ? 'primary' : ''}`} onClick={() => setTab('dangerous')}>
+        <button className={`btn ${tab === 'dangerous' ? 'primary' : ''}`} onClick={() => { setError(''); setTab('dangerous') }}>
           危险操作日志
         </button>
-        <button className="btn" onClick={load}>
+        <button className="btn" onClick={() => { setError(''); load() }}>
           刷新
         </button>
       </div>
@@ -110,7 +109,7 @@ export default function AuditView() {
 
       <Card title="安全机制" hint="四级角色 · 危险操作二次确认 · 审计留痕">
         <div style={{ fontSize: 12.5, color: 'var(--text-1)', lineHeight: 1.9 }}>
-          <div>· <b>角色分级</b>：admin（全部）{' > '}operator（常规操作）{' > '}viewer（只读）{' > '}user（自助）{' > '}guest</div>
+          <div>· <b>角色分级</b>：admin（全部）{' > '}editor（常规读写）{' > '}viewer（只读）{' > '}guest（仅对话）</div>
           <div>· <b>危险操作</b>：退款执行、知识库删除等需 token 二次确认（5 分钟过期）</div>
           <div>· <b>审计日志</b>：所有敏感操作记录 谁/何时/做了什么/成功与否</div>
           <div>· <b>转人工红线</b>：食品安全、账户安全场景强制升级人工（见对话视图）</div>

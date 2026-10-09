@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from infra.skills_manager import Skill
+from infra.llm_usage import UsageTracker
 
 from .models import CandidateSpec, EvalCase, EvaluationStatus, ExecutionResult
 
@@ -48,7 +49,7 @@ class InProcessAgentExecutor:
         session_id = f"harness_{run_id}_{case.case_id}_{repetition}"
         manager = self.orchestrator.skills_manager
         context = manager.candidate_overlay([overlay] if overlay else [])
-        with context:
+        with context, UsageTracker() as tracker:
             output = await asyncio.wait_for(
                 self.orchestrator.process(
                     query=query,
@@ -62,13 +63,22 @@ class InProcessAgentExecutor:
         latency_ms = (time.perf_counter() - started) * 1000
         error_info = str(output.get("error_info") or "").strip()
         status = EvaluationStatus.INFRA_ERROR if error_info else EvaluationStatus.SUCCESS
-        raw_tokens = output.get("tokens_consumed")
-        raw_cost = output.get("estimated_cost")
-        usage_available = bool(
-            output.get("usage_available")
-            or (raw_tokens not in (None, 0))
-            or (raw_cost not in (None, 0))
-        )
+        usage = tracker.snapshot()
+        # A deterministic policy refusal legitimately makes zero model calls.
+        # It is still fully accounted for and must not be confused with a
+        # provider that forgot to report usage.
+        if usage["calls"] == 0 and output.get("usage_available"):
+            usage["complete"] = True
+            usage["usage_complete"] = True
+            usage["cost_complete"] = True
+        raw_tokens = usage["total_tokens"]
+        raw_cost = usage["estimated_cost"]
+        usage_available = bool(usage.get("complete"))
+        output["usage"] = usage
+        output["usage_available"] = usage_available
+        output["tokens_consumed"] = raw_tokens
+        output["estimated_cost"] = raw_cost
+        output["model_call_count"] = usage["calls"]
         return ExecutionResult(
             output=output,
             trace={"trace_id": output.get("trace_id"), "spans": output.get("spans", [])},
@@ -78,4 +88,6 @@ class InProcessAgentExecutor:
             tokens=int(raw_tokens or 0),
             cost=float(raw_cost or 0.0),
             usage_available=usage_available,
+            usage=usage,
+            tool_events=list(output.get("tool_events") or []),
         )

@@ -13,6 +13,8 @@
 import re
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
@@ -33,6 +35,7 @@ class MetricDefinition:
     dimensions: List[str] = field(default_factory=list)   # 支持的维度字段列表
     sql_template: Optional[str] = None     # 自定义 SQL 模板（高级场景）
     round_decimal: Optional[int] = None    # 结果保留小数位（None 不 ROUND）
+    from_clause: Optional[str] = None      # 声明式指标的已审核 FROM/JOIN 路径
 
 
 # ==================== Olist 巴西电商核心指标 ====================
@@ -279,6 +282,68 @@ DIMENSION_MAP: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# 可选的本地治理目录。在受信任的部署环境中配置；不接受用户查询直接修改。
+EXTRA_METRIC_ALIASES: Dict[str, List[str]] = {}
+EXTRA_DIMENSION_ALIASES: Dict[str, List[str]] = {}
+
+
+def load_semantic_registry(path: str) -> None:
+    """加载受治理指标与维度，先完整校验，再一次性更新当前目录。"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("语义目录必须是 JSON 对象")
+    raw_metrics = data.get("metrics", {})
+    raw_dimensions = data.get("dimensions", {})
+    if not isinstance(raw_metrics, dict) or not isinstance(raw_dimensions, dict):
+        raise ValueError("metrics 和 dimensions 必须是对象")
+
+    dimensions = dict(DIMENSION_MAP)
+    for name, spec in raw_dimensions.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+            raise ValueError(f"非法维度名: {name}")
+        if name in dimensions or not isinstance(spec, dict):
+            raise ValueError(f"维度重复或定义无效: {name}")
+        if not all(isinstance(spec.get(key), str) and spec[key] for key in ("dataset", "source")):
+            raise ValueError(f"维度缺少 dataset/source: {name}")
+        dimensions[name] = spec
+
+    metrics = dict(ALL_METRICS)
+    metric_aliases: Dict[str, List[str]] = {}
+    dimension_aliases: Dict[str, List[str]] = {}
+    for name, spec in raw_metrics.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+            raise ValueError(f"非法指标名: {name}")
+        if name in metrics or not isinstance(spec, dict):
+            raise ValueError(f"指标重复或定义无效: {name}")
+        aliases = spec.get("aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(x, str) and x.strip() for x in aliases):
+            raise ValueError(f"指标别名无效: {name}")
+        definition = MetricDefinition(name=name, **{k: v for k, v in spec.items() if k != "aliases"})
+        if definition.aggregation not in {"SUM", "COUNT", "COUNTD", "AVG", "RATE", "CUSTOM"}:
+            raise ValueError(f"不支持的聚合方式: {name}")
+        if not definition.from_clause or not definition.from_clause.strip():
+            raise ValueError(f"配置指标必须提供已审核的 from_clause: {name}")
+        for dim in definition.dimensions:
+            if dim not in dimensions or dimensions[dim]["dataset"] != definition.dataset:
+                raise ValueError(f"指标与维度不匹配: {name}/{dim}")
+        metrics[name] = definition
+        metric_aliases[name] = aliases
+
+    for name, spec in raw_dimensions.items():
+        aliases = spec.get("aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(x, str) and x.strip() for x in aliases):
+            raise ValueError(f"维度别名无效: {name}")
+        dimension_aliases[name] = aliases
+
+    DIMENSION_MAP.update(raw_dimensions)
+    ALL_METRICS.update({name: metrics[name] for name in raw_metrics})
+    EXTRA_METRIC_ALIASES.update(metric_aliases)
+    EXTRA_DIMENSION_ALIASES.update(dimension_aliases)
+
+
+if os.getenv("SEMANTIC_REGISTRY_PATH"):
+    load_semantic_registry(os.environ["SEMANTIC_REGISTRY_PATH"])
+
 
 # ==================== 复合 Metric Plan（派生口径 / 跨库组合） ====================
 #
@@ -360,6 +425,8 @@ class MetricPlanCompiler:
         """
         composite = plan.get("composite")
         if composite:
+            if plan.get("filters"):
+                raise ValueError("复合模板不能忽略用户筛选")
             return self._compile_composite(composite, plan.get("limit"))
 
         metrics = plan.get("metrics", [])
@@ -392,6 +459,8 @@ class MetricPlanCompiler:
             and ALL_METRICS[metrics[0]].sql_template
             and not dimensions
         ):
+            if filters:
+                raise ValueError("自定义 SQL 模板不能忽略用户筛选")
             sql = ALL_METRICS[metrics[0]].sql_template
             if limit:
                 sql = sql.rstrip(";") + f"\nLIMIT {limit}"
@@ -410,21 +479,33 @@ class MetricPlanCompiler:
             select_parts.append(self._render_measure(metric_def) + f" AS {m}")
 
         # 构建 FROM + JOIN
-        from_clause = self._build_from(metrics, dimensions)
+        join_dimensions = list(dict.fromkeys([*dimensions, *(key for key in filters if key in DIMENSION_MAP)]))
+        from_clause = self._build_from(metrics, join_dimensions)
 
         # 构建 WHERE
         where_parts = []
         for k, v in filters.items():
+            def literal(value):
+                return "'" + str(value).replace("'", "''") + "'"
+            if k == "purchase_year":
+                if dataset != "olist" or isinstance(v, bool) or not isinstance(v, int) or not 2000 <= v <= 2099:
+                    raise ValueError("非法下单年份过滤")
+                where_parts.extend([f"order_purchase_timestamp >= '{v}-01-01'", f"order_purchase_timestamp < '{v + 1}-01-01'"])
+                continue
             if k in DIMENSION_MAP:
                 src = DIMENSION_MAP[k]["source"]
                 if isinstance(v, list):
-                    in_list = ", ".join(f"'{x}'" for x in v)
+                    in_list = ", ".join(literal(x) for x in v)
                     where_parts.append(f"{src} IN ({in_list})")
                 else:
-                    where_parts.append(f"{src} = '{v}'")
+                    where_parts.append(f"{src} = {literal(v)}")
+            elif k == "order_status" and dataset == "olist":
+                values = v if isinstance(v, list) else [v]
+                if not values or any(x not in {"delivered", "canceled", "shipped", "approved"} for x in values):
+                    raise ValueError("非法订单状态过滤")
+                where_parts.append("order_status IN (" + ", ".join(literal(x) for x in values) + ")")
             else:
-                # 尝试直接作为字段名
-                where_parts.append(f"{k} = '{v}'")
+                raise ValueError(f"未经治理的筛选字段: {k}")
 
         # 指标默认过滤条件只作用于普通聚合。RATE 的 filter_expr 已在分子 CASE WHEN 内，
         # 若再放入 WHERE 会把分母过滤成同一集合，错误地把所有差评率计算为 100%。
@@ -486,6 +567,9 @@ class MetricPlanCompiler:
         metric_names = set(metrics)
         dim_names = set(dimensions)
         dataset = ALL_METRICS[metrics[0]].dataset
+
+        if len(metrics) == 1 and ALL_METRICS[metrics[0]].from_clause:
+            return ALL_METRICS[metrics[0]].from_clause
 
         if dataset == "olist":
             needs_items = bool(dim_names & {"seller_state", "product_category_name"}) or "sales_revenue" in metric_names or "seller_count" in metric_names
@@ -560,6 +644,8 @@ class MetricPlanCompiler:
         for dim in plan.get("dimensions", []):
             if dim not in DIMENSION_MAP:
                 errors.append(f"未知维度: {dim}")
+            elif len(metrics) == 1 and metrics[0] in EXTRA_METRIC_ALIASES and dim not in ALL_METRICS[metrics[0]].dimensions:
+                errors.append(f"指标不支持维度: {metrics[0]}/{dim}")
         return errors
 
 
@@ -599,10 +685,10 @@ def match_composite_plan_by_query(query: str) -> Optional[str]:
 def match_metrics_by_query(query: str) -> List[str]:
     """基于业务别名从 query 中匹配可能相关的指标，并按数据域消除同义词歧义。"""
     query_lower = query.lower()
-    is_chinook = any(word in query_lower for word in ("chinook", "音乐", "流派", "艺术家", "歌手", "专辑", "曲目", "发票"))
+    is_chinook = any(word in query_lower for word in ("chinook", "音乐", "流派", "艺术家", "歌手", "专辑", "曲目", "发票", "invoice", "genre", "artist", "track"))
     aliases = {
-        "sales_revenue": ["销售额", "销售收入", "成交额", "gmv"],
-        "order_count": ["订单量", "订单数", "订单"],
+        "sales_revenue": ["销售额", "销售收入", "成交额", "gmv", "sales revenue"],
+        "order_count": ["订单量", "订单数", "订单", "order count"],
         "avg_order_value": ["客单价", "平均订单金额"],
         "repeat_customers": ["回头客", "复购客户", "复购用户"],
         "bad_review_rate": ["差评率", "差评", "低评分"],
@@ -611,12 +697,13 @@ def match_metrics_by_query(query: str) -> List[str]:
         "payment_distribution": ["支付方式", "支付占比"],
         "seller_count": ["卖家数", "活跃卖家"],
         "revenue": ["收入", "营收", "revenue"],
-        "invoice_count": ["发票数", "发票量"],
+        "invoice_count": ["发票数", "发票量", "invoice count"],
         "track_count": ["曲目销量", "曲目数"],
-        "genre_revenue": ["流派收入", "流派营收"],
-        "artist_revenue": ["艺术家收入", "歌手收入"],
+        "genre_revenue": ["流派收入", "流派营收", "genre revenue"],
+        "artist_revenue": ["艺术家收入", "歌手收入", "artist revenue"],
     }
-    matched = [name for name, words in aliases.items() if any(word in query_lower for word in words)]
+    aliases.update(EXTRA_METRIC_ALIASES)
+    matched = [name for name, words in aliases.items() if any(word in query_lower for word in [name, *words])]
     # “收入/订单/数量”等词跨两个数据集同名；显式 Chinook 语境优先其指标，
     # 否则避免把 Olist 指标错误编译到 Chinook 问题。
     if is_chinook:
@@ -632,6 +719,9 @@ def match_metrics_by_query(query: str) -> List[str]:
             return ["invoice_count"]
         if "收入" in query_lower or "营收" in query_lower:
             return ["revenue"]
+    elif "sales_revenue" in matched:
+        # sales revenue 是 Olist 的专用口径，不能同时命中 Chinook 的泛称 revenue。
+        matched = [name for name in matched if name != "revenue"]
     return matched
 
 

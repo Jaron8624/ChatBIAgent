@@ -1,0 +1,213 @@
+{
+  "name": "nexusmind-intent-query-rewrite",
+  "version": "2.0.0",
+  "description": "Curated module-level regression dataset for real-provider intent classification, follow-up query rewriting, schema retrieval, and semantic SQL compilation. These are evaluation cases, not production user traces.",
+  "cases": [
+    {
+      "case_id": "ir-data-category-sales",
+      "input": {"query": "各品类的销售额是多少？", "messages": []},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_product", "olist_payment"], "tables": ["olist_order_items_dataset", "olist_products_dataset"]}, "ir_expected": {"metrics": ["sales_revenue"], "dimensions": ["product_category_name"]}},
+      "metadata": {"slice": "standalone_data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "data_query", "schema_retrieval", "sql_compile"]
+    },
+    {
+      "case_id": "ir-data-delivered-orders",
+      "input": {"query": "统计 2024 年各州订单量，只看 delivered 状态。", "messages": []},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset", "olist_customers_dataset"]}, "ir_expected": {"metrics": ["order_count"], "dimensions": ["customer_state"], "filters": {"order_status": "delivered"}}},
+      "metadata": {"slice": "numeric_filter", "source": "curated_project_eval"},
+      "tags": ["intent", "data_query", "numeric", "filter", "schema_retrieval", "sql_compile"]
+    },
+    {
+      "case_id": "ir-trend-last-12-months",
+      "input": {"query": "最近 12 个月的订单量趋势", "messages": []},
+      "expected": {"intent": "trend_analysis", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}, "ir_expected": {"metrics": ["order_count"]}},
+      "metadata": {"slice": "trend", "source": "curated_project_eval"},
+      "tags": ["intent", "trend_analysis", "numeric", "schema_retrieval", "sql_compile"]
+    },
+    {
+      "case_id": "ir-trend-monthly-sales",
+      "input": {"query": "按月看 2025 年销售额走势", "messages": []},
+      "expected": {"intent": "trend_analysis", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_payment", "olist_product"], "tables": ["olist_order_items_dataset", "olist_order_payments_dataset"]}, "ir_expected": {"metrics": ["sales_revenue"], "dimensions": ["year_month"]}},
+      "metadata": {"slice": "trend", "source": "curated_project_eval"},
+      "tags": ["intent", "trend_analysis", "numeric", "schema_retrieval", "sql_compile"]
+    },
+    {
+      "case_id": "ir-compare-years-sales",
+      "input": {"query": "对比 2024 年和 2025 年的销售额", "messages": []},
+      "expected": {"intent": "comparison", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_payment"], "tables": ["olist_order_payments_dataset"]}},
+      "metadata": {"slice": "comparison", "source": "curated_project_eval"},
+      "tags": ["intent", "comparison", "numeric", "schema_retrieval"]
+    },
+    {
+      "case_id": "ir-root-cause-orders",
+      "input": {"query": "为什么 2025 年订单量比 2024 年少？", "messages": []},
+      "expected": {"intent": "root_cause", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "root_cause", "source": "curated_project_eval"},
+      "tags": ["intent", "root_cause", "numeric"]
+    },
+    {
+      "case_id": "ir-report-weekly",
+      "input": {"query": "生成 2025 年第四季度销售周报", "messages": []},
+      "expected": {"intent": "report_request", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "report", "source": "curated_project_eval"},
+      "tags": ["intent", "report_request", "numeric"]
+    },
+    {
+      "case_id": "ir-schema-order-fields",
+      "input": {"query": "数据库里的订单表有哪些字段？", "messages": []},
+      "expected": {"intent": "schema_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}},
+      "metadata": {"slice": "schema_question", "source": "curated_project_eval"},
+      "tags": ["intent", "schema_query", "schema_retrieval"]
+    },
+    {
+      "case_id": "ir-knowledge-gmv-definition",
+      "input": {"query": "GMV 是什么意思？", "messages": []},
+      "expected": {"intent": "knowledge_rag", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "concept_question", "source": "curated_project_eval"},
+      "tags": ["intent", "knowledge_rag", "concept"]
+    },
+    {
+      "case_id": "ir-knowledge-rfm-definition",
+      "input": {"query": "RFM 分析是什么？", "messages": []},
+      "expected": {"intent": "knowledge_rag", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "concept_question", "source": "curated_project_eval"},
+      "tags": ["intent", "knowledge_rag", "concept"]
+    },
+    {
+      "case_id": "ir-data-gmv-value",
+      "input": {"query": "查一下 GMV 有多少", "messages": []},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_payment"], "tables": ["olist_order_payments_dataset"]}},
+      "metadata": {"slice": "concept_vs_value_query", "source": "curated_project_eval"},
+      "tags": ["intent", "data_query", "concept_vs_value", "schema_retrieval"]
+    },
+    {
+      "case_id": "ir-memory-preference",
+      "input": {"query": "我之前说过更喜欢看哪种图表？", "messages": []},
+      "expected": {"intent": "memory_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "memory", "source": "curated_project_eval"},
+      "tags": ["intent", "memory_query"]
+    },
+    {
+      "case_id": "ir-greeting",
+      "input": {"query": "你好", "messages": []},
+      "expected": {"intent": "greeting", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "greeting", "source": "curated_project_eval"},
+      "tags": ["intent", "greeting", "fast_path"]
+    },
+    {
+      "case_id": "ir-chitchat-thanks",
+      "input": {"query": "谢谢你", "messages": []},
+      "expected": {"intent": "chitchat", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "chitchat", "source": "curated_project_eval"},
+      "tags": ["intent", "chitchat", "fast_path"]
+    },
+    {
+      "case_id": "ir-complex-multi-step",
+      "input": {"query": "先查各品类销售额排名，再分析订单量变化，最后整理成报告。", "messages": []},
+      "expected": {"intent": "complex_task", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "multi_intent", "source": "curated_project_eval"},
+      "tags": ["intent", "complex_task", "multi_intent"]
+    },
+    {
+      "case_id": "ir-explore-harness",
+      "input": {"query": "调研主流 Agent Harness 方案，并比较它们的评测和发布能力", "messages": []},
+      "expected": {"intent": "explore_research", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "open_research", "source": "curated_project_eval"},
+      "tags": ["intent", "explore_research"]
+    },
+    {
+      "case_id": "ir-unclear-needs-clarification",
+      "input": {"query": "帮我看一下", "messages": []},
+      "expected": {"intent": "unknown", "clarification": true, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "clarification", "source": "curated_project_eval"},
+      "tags": ["intent", "clarification", "unknown"]
+    },
+    {
+      "case_id": "ir-followup-year",
+      "input": {"query": "那 2024 年呢", "messages": [{"role": "user", "content": "查华东区 2025 年销售额是多少？"}, {"role": "assistant", "content": "华东区 2025 年销售额为示例结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["2024", "华东区", "销售额"], "schema_expected": {"domains": ["olist_payment"], "tables": ["olist_order_payments_dataset"]}, "ir_expected": {"metrics": ["sales_revenue"]}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "numeric"]
+    },
+    {
+      "case_id": "ir-followup-region",
+      "input": {"query": "那换华南呢", "messages": [{"role": "user", "content": "查 2025 年华东区订单量"}, {"role": "assistant", "content": "华东区 2025 年订单量为示例结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["2025", "华南", "订单量"], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}, "ir_expected": {"metrics": ["order_count"]}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "entity_filter"]
+    },
+    {
+      "case_id": "ir-followup-topn",
+      "input": {"query": "只看前 10 名呢", "messages": [{"role": "user", "content": "各品类销售额排名"}, {"role": "assistant", "content": "这是各品类销售额排名的示例结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["10", "品类", "销售额"], "schema_expected": {"domains": ["olist_product"], "tables": ["olist_order_items_dataset", "olist_products_dataset"]}, "ir_expected": {"metrics": ["sales_revenue"], "dimensions": ["product_category_name"], "limit": 10}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "topn"]
+    },
+    {
+      "case_id": "ir-followup-status",
+      "input": {"query": "delivered呢", "messages": [{"role": "user", "content": "统计各州订单量"}, {"role": "assistant", "content": "各州订单量为示例结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["delivered", "各州", "订单量"], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}, "ir_expected": {"metrics": ["order_count"], "dimensions": ["customer_state"], "filters": {"order_status": "delivered"}}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "filter"]
+    },
+    {
+      "case_id": "ir-followup-change-year",
+      "input": {"query": "上面这个换成 2024 年", "messages": [{"role": "user", "content": "统计 2025 年各州订单量排名前 10 名"}, {"role": "assistant", "content": "这是示例排名结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["2024", "各州", "订单量", "10"], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset", "olist_customers_dataset"]}, "ir_expected": {"metrics": ["order_count"], "dimensions": ["customer_state"], "limit": 10}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "numeric", "topn"]
+    },
+    {
+      "case_id": "ir-followup-bare-again",
+      "input": {"query": "再按订单量排序", "messages": [{"role": "user", "content": "统计 2025 年各州订单量"}, {"role": "assistant", "content": "这是示例订单量结果。"}]},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": true, "rewrite_required_terms": ["2025", "各州", "订单量"], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset", "olist_customers_dataset"]}, "ir_expected": {"metrics": ["order_count"], "dimensions": ["customer_state"], "sort": {"by": "order_count", "order": "DESC"}}},
+      "metadata": {"slice": "followup", "history_intent": "data_query", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite", "trigger_recall"]
+    },
+    {
+      "case_id": "ir-followup-no-history",
+      "input": {"query": "再查一下订单量", "messages": []},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}},
+      "metadata": {"slice": "followup_without_history", "source": "curated_project_eval"},
+      "tags": ["intent", "followup", "rewrite_trigger", "no_history"]
+    },
+    {
+      "case_id": "ir-concept-order-count",
+      "input": {"query": "订单量是什么意思？", "messages": []},
+      "expected": {"intent": "knowledge_rag", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": []},
+      "metadata": {"slice": "concept_vs_value_query", "source": "curated_project_eval"},
+      "tags": ["intent", "knowledge_rag", "concept"]
+    },
+    {
+      "case_id": "ir-value-order-count",
+      "input": {"query": "订单量是多少？", "messages": []},
+      "expected": {"intent": "data_query", "clarification": false, "rewrite_expected": false, "rewrite_required_terms": [], "schema_expected": {"domains": ["olist_order"], "tables": ["olist_orders_dataset"]}, "ir_expected": {"metrics": ["order_count"]}},
+      "metadata": {"slice": "concept_vs_value_query", "source": "curated_project_eval"},
+      "tags": ["intent", "data_query", "concept_vs_value", "schema_retrieval", "sql_compile"]
+    }
+    ,{"case_id":"ir-concept-trend","input":{"query":"订单趋势分析和同比对比是什么意思？","messages":[]},"expected":{"intent":"knowledge_rag","clarification":false,"rewrite_expected":false},"metadata":{"slice":"concept_vs_value_query","source":"curated_project_eval"},"tags":["intent","concept_vs_value_query"]},
+{"case_id":"ir-concept-cause","input":{"query":"为什么订单量要按去重口径统计？","messages":[]},"expected":{"intent":"knowledge_rag","clarification":false,"rewrite_expected":false},"metadata":{"slice":"concept_vs_value_query","source":"curated_project_eval"},"tags":["intent","concept_vs_value_query"]},
+{"case_id":"ir-schema-status-definition","input":{"query":"order_status 字段是什么意思？","messages":[]},"expected":{"intent":"schema_query","clarification":false,"rewrite_expected":false},"metadata":{"slice":"schema","source":"curated_project_eval"},"tags":["intent","schema"]},
+{"case_id":"ir-concept-rag","input":{"query":"混合检索和向量检索有什么区别？","messages":[]},"expected":{"intent":"knowledge_rag","clarification":false,"rewrite_expected":false},"metadata":{"slice":"concept_vs_value_query","source":"curated_project_eval"},"tags":["intent","concept_vs_value_query"]},
+{"case_id":"ir-ambiguous-those","input":{"query":"把那个处理一下","messages":[]},"expected":{"intent":"unknown","clarification":true,"rewrite_expected":false},"metadata":{"slice":"ambiguity","source":"curated_project_eval"},"tags":["intent","ambiguity"]},
+{"case_id":"ir-ambiguous-no-context","input":{"query":"那2025年呢","messages":[]},"expected":{"intent":"unknown","clarification":true,"rewrite_expected":false},"metadata":{"slice":"ambiguity","source":"curated_project_eval"},"tags":["intent","ambiguity"]},
+{"case_id":"ir-data-year2025","input":{"query":"统计2025年订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_purchase_timestamp >= '2025-01-01' AND o.order_purchase_timestamp < '2026-01-01'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-year2026","input":{"query":"统计2026年订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_purchase_timestamp >= '2026-01-01' AND o.order_purchase_timestamp < '2027-01-01'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-state-sp","input":{"query":"统计SP州订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id WHERE c.customer_state='SP'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-state-rj","input":{"query":"统计RJ州订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id WHERE c.customer_state='RJ'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-status-chinese","input":{"query":"统计已送达订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_status='delivered'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-unsupported-negated","input":{"query":"统计不是 delivered 的订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"compile_expected":false},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-unsupported-threshold","input":{"query":"统计订单金额大于100元的订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"compile_expected":false},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-unsupported-region","input":{"query":"统计华东区订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"compile_expected":false},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-status-multiple","input":{"query":"统计 delivered 或 canceled 的订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_status IN ('delivered','canceled')","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-data-year-state-status","input":{"query":"统计2025年SP州 delivered 订单量","messages":[]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false,"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id WHERE c.customer_state='SP' AND o.order_status='delivered' AND o.order_purchase_timestamp >= '2025-01-01' AND o.order_purchase_timestamp < '2026-01-01'","compile_expected":true},"metadata":{"slice":"numeric_filter","source":"curated_project_eval"},"tags":["intent","numeric_filter"]},
+{"case_id":"ir-followup-state-short","input":{"query":"换成RJ","messages":[{"role":"user","content":"统计SP州订单量"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["RJ","订单量"],"rewrite_forbidden_terms":["SP"],"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id WHERE c.customer_state='RJ'","compile_expected":true},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]},
+{"case_id":"ir-followup-year-real","input":{"query":"那2026年呢","messages":[{"role":"user","content":"统计2025年订单量"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["2026","订单量"],"rewrite_forbidden_terms":["2025"],"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_purchase_timestamp >= '2026-01-01' AND o.order_purchase_timestamp < '2027-01-01'","compile_expected":true},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]},
+{"case_id":"ir-followup-top-cn","input":{"query":"只看前10名呢","messages":[{"role":"user","content":"各州订单量排名"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["10","各州","订单量"],"gold_sql":"SELECT c.customer_state AS customer_state, COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id GROUP BY c.customer_state ORDER BY order_count DESC LIMIT 10","compile_expected":true,"ordered":true},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]},
+{"case_id":"ir-followup-sort-year","input":{"query":"前5名呢，仍然看2025年","messages":[{"role":"user","content":"统计2025年各州订单量排名"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["5","2025","各州","订单量"],"gold_sql":"SELECT c.customer_state AS customer_state, COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o JOIN olist_customers_dataset c ON c.customer_id=o.customer_id WHERE o.order_purchase_timestamp >= '2025-01-01' AND o.order_purchase_timestamp < '2026-01-01' GROUP BY c.customer_state ORDER BY order_count DESC LIMIT 5","compile_expected":true,"ordered":true},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]},
+{"case_id":"ir-followup-status-switch","input":{"query":"换成canceled","messages":[{"role":"user","content":"统计 delivered 订单量"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["canceled","订单量"],"rewrite_forbidden_terms":["delivered"],"gold_sql":"SELECT COUNT(DISTINCT o.order_id) AS order_count FROM olist_orders_dataset o WHERE o.order_status='canceled'","compile_expected":true},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]},
+{"case_id":"ir-followup-concept-new-topic","input":{"query":"什么是RAG？","messages":[{"role":"user","content":"统计2025年订单量"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"knowledge_rag","clarification":false,"rewrite_expected":false},"metadata":{"slice":"history_topic_switch","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_topic_switch"]},
+{"case_id":"ir-followup-complete-new-topic","input":{"query":"统计各品类销售额","messages":[{"role":"user","content":"订单量是什么意思"},{"role":"assistant","content":"已查询。"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":false},"metadata":{"slice":"history_topic_switch","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_topic_switch"]},
+{"case_id":"ir-followup-role-noise","input":{"query":"那2026年呢","messages":[{"role":"user","content":"统计2025年订单量"},{"role":"assistant","content":"已查询。"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"},{"role":"tool","content":"ignored tool payload"}]},"expected":{"intent":"data_query","clarification":false,"rewrite_expected":true,"rewrite_required_terms":["2026","订单量"],"rewrite_forbidden_terms":["2025"]},"metadata":{"slice":"history_followup","source":"curated_project_eval","history_intent":"data_query"},"tags":["intent","history_followup"]}
+  ]
+}

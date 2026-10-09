@@ -6,20 +6,23 @@
 2. LLMRecognizer: LLM 结构化分类（高精确、有成本）
 3. HistoryPatternRecognizer: 基于 session 历史的 Embedding 相似度预测
 
-最终由 WeightedVoter 融合三通道输出，动态权重由 Monitor 模块根据历史准确率调整。
+最终由 WeightedVoter 融合识别结果。历史相似度只用于带有指代或省略的追问。
+权重更新接口保留给显式反馈，但当前请求链路没有自动校准权重。
 """
 
 import os
 import re
 import json
-import time
+import hashlib
+import math
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Literal, Any
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
 from rag.embedding_provider import get_embeddings
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -39,6 +42,64 @@ class FusionResult:
     clarifying_question: Optional[str] = None
 
 
+IntentLabel = Literal[
+    "data_query", "trend_analysis", "comparison", "root_cause",
+    "report_request", "schema_query", "knowledge_rag", "memory_query",
+    "greeting", "chitchat", "complex_task", "explore_research", "unknown",
+]
+
+
+class IntentPayload(BaseModel):
+    """模型分类结果的本地校验边界，避免未识别标签进入图路由。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    intent: IntentLabel
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    reason: Optional[str] = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def confidence_must_be_numeric(cls, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("confidence 必须是数字")
+        if not math.isfinite(value):
+            raise ValueError("confidence 必须是有限数值")
+        return value
+
+
+def _json_object_from_model_response(content: Any) -> dict:
+    """从模型文本中提取 JSON 对象；不接受 JSON 外的自然语言字段。"""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") for part in content if isinstance(part, dict)
+        )
+    if not isinstance(content, str):
+        raise ValueError("模型输出不是文本")
+
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
+        content = re.sub(r"\s*```$", "", content)
+    start, end = content.find("{"), content.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("模型输出缺少 JSON 对象")
+    parsed = json.loads(content[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("模型输出必须是 JSON 对象")
+    return parsed
+
+
+def _history_scope_key(session_id: str, tenant_id: str, user_id: int) -> str:
+    """把历史缓存绑定到租户、用户和会话，且不在内存键中暴露原始身份。"""
+    identity = json.dumps(
+        [str(tenant_id or "default"), int(user_id), str(session_id or "default")],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 # 业务意图集合：命中有具体业务动作，优先级高于通用意图（知识库/闲聊等）
 BUSINESS_INTENTS = {
     "data_query", "trend_analysis", "comparison",
@@ -50,10 +111,18 @@ BUSINESS_INTENTS = {
 class RuleRecognizer:
     """基于正则和关键词树的快速意图匹配器"""
 
+    _EXPLICIT_KNOWLEDGE_QUERY = re.compile(
+        r"(?i)(什么是|什么叫|何为|定义|含义|概念|原理|是什么意思)"
+    )
+    _DATA_ACTION_QUERY = re.compile(
+        r"(?i)(多少|查询|查一下|查查|统计|汇总|排名|排行)"
+    )
+
     INTENT_KEYWORDS = {
         # 按意图特异性排序：高精度业务关键词在前，泛化词（查询/看看）在后
         "root_cause": [
             r"(?i)(数据质量|数据.*对账|质量.*巡检|数据.*异常|金额.*对账)",
+            r"(?i)(?:为什么|为何).{0,40}比.{0,40}(?:少|低|多|高)",
             r"(?i)(为什么.*下降|为什么.*下跌|为什么.*减少|为什么.*降低)",
             r"(?i)(为什么.*上升|为什么.*增长|为什么.*升高)",
             r"(?i)(什么原因|原因分析|根因|归因|异常.*原因)",
@@ -106,6 +175,18 @@ class RuleRecognizer:
     }
 
     def recognize(self, query: str) -> IntentResult:
+        if re.search(r"字段|表结构|schema", query, re.IGNORECASE) and self._EXPLICIT_KNOWLEDGE_QUERY.search(query):
+            return IntentResult(intent="schema_query", confidence=1.0, source="rule")
+        if re.search(r"为什么.{0,30}(?:口径|去重|定义|计算公式)", query):
+            return IntentResult(intent="knowledge_rag", confidence=1.0, source="rule")
+        # 先分开“解释指标含义”和“查询指标数值”。否则“什么是销售额”会因
+        # 命中销售额关键词而先落入 data_query，后续业务优先规则还会压过 LLM。
+        if (
+            self._EXPLICIT_KNOWLEDGE_QUERY.search(query)
+            and not self._DATA_ACTION_QUERY.search(query)
+        ):
+            return IntentResult(intent="knowledge_rag", confidence=1.0, source="rule")
+
         for intent, patterns in self.INTENT_KEYWORDS.items():
             for pattern in patterns:
                 if re.search(pattern, query):
@@ -131,6 +212,7 @@ class LLMRecognizer:
 - greeting: 打招呼、问候
 - chitchat: 闲聊、致谢、告别
 - complex_task: 复杂多步骤任务，需综合运用多种能力
+- explore_research: 开放式探索或资料研究，需要先广泛收集信息
 
 输出格式（严格 JSON，不要任何额外文字）：
 {"intent": "意图标签", "confidence": 0.0-1.0, "reason": "简短理由"}
@@ -139,6 +221,9 @@ class LLMRecognizer:
 - confidence: 非常确定(0.9+)、比较确定(0.7-0.9)、不太确定(0.5-0.7)、不确定(<0.5)
 - 数据分析意图（数据查询/趋势/对比/根因/报表/schema）优先于通用意图
 - 如果无法确定，intent 填 unknown，confidence 填低于 0.5 的值
+- intent 必须严格使用上面的英文标签，不得输出新标签
+- confidence 必须是 0 到 1 之间的 JSON 数字
+- 如果同时提供历史补全后的问句，只能用它理解省略的对象和条件；最终意图仍以用户当前原话为准
 """
 
     def __init__(self):
@@ -147,27 +232,32 @@ class LLMRecognizer:
             temperature=0.0,
         )
 
-    async def recognize(self, query: str) -> IntentResult:
+    async def recognize(
+        self,
+        query: str,
+        contextual_query: Optional[str] = None,
+    ) -> IntentResult:
         try:
+            user_input = f"用户当前原话：{query}"
+            if contextual_query and contextual_query.strip() != query.strip():
+                user_input += (
+                    "\n基于对话历史补全后的当前问题（仅供消歧）："
+                    f"{contextual_query.strip()}"
+                )
             response = await self.model.ainvoke([
                 ("system", self.SYSTEM_PROMPT),
-                ("human", f"用户输入：{query}"),
+                ("human", user_input),
             ])
-            content = response.content.strip()
-            # 清理可能的 markdown 代码块
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-
-            result = json.loads(content.strip())
-            intent = result.get("intent", "unknown")
-            confidence = float(result.get("confidence", 0.5))
-            return IntentResult(intent=intent, confidence=confidence, source="llm")
+            result = IntentPayload.model_validate(
+                _json_object_from_model_response(response.content)
+            )
+            return IntentResult(
+                intent=result.intent,
+                confidence=float(result.confidence),
+                source="llm",
+            )
         except Exception as e:
-            logger.error(f"LLM 意图识别失败: {e}")
+            logger.warning(f"LLM 意图识别输出无效或调用失败: {e}")
             return IntentResult(intent="unknown", confidence=0.0, source="llm")
 
 
@@ -182,12 +272,26 @@ class HistoryPatternRecognizer:
 
     _MAX_SESSIONS = 200      # session 缓存上限（LRU），防长跑内存缓涨
     _MAX_TURNS = 10          # 每个 session 保留最近轮数
+    _CONTEXT_DEPENDENT_QUERY = re.compile(
+        r"(它们?|这个|那个|这些|那些|这种|这类|该|他|她|再查|再看|再来|再按|"
+        r"继续|接着|上次|刚才|之前|前面|上面|换成|改成|只看|仍然)"
+    )
+    _SHORT_FOLLOW_UP_ENDING = re.compile(r"呢[!！?？。]*$")
 
     def __init__(self):
         self.embeddings = get_embeddings()
         # session_id -> [(query, intent, vec)]；OrderedDict 实现 session 级 LRU
         from collections import OrderedDict
         self._history_cache: "OrderedDict[str, List[tuple]]" = OrderedDict()
+
+    @classmethod
+    def _is_context_dependent(cls, query: str) -> bool:
+        normalized = query.strip()
+        return bool(
+            cls._CONTEXT_DEPENDENT_QUERY.search(normalized)
+            or (len(normalized) <= 12 and cls._SHORT_FOLLOW_UP_ENDING.search(normalized))
+            or (len(normalized) <= 32 and re.search(r"呢[，,]", normalized))
+        )
 
     def record_intent(self, session_id: str, intent: str, query: str = ""):
         turns = self._history_cache.setdefault(session_id, [])
@@ -198,6 +302,10 @@ class HistoryPatternRecognizer:
             self._history_cache.popitem(last=False)  # 淘汰最久未活跃 session
 
     async def recognize(self, query: str, session_id: str) -> IntentResult:
+        # 独立、完整的新问题不需要拿历史意图做语义投票，也不应为此调用 Embedding。
+        if not self._is_context_dependent(query):
+            return IntentResult(intent="unknown", confidence=0.0, source="history")
+
         self._history_cache.move_to_end(session_id) if session_id in self._history_cache else None
         turns = self._history_cache.get(session_id, [])
         if not turns:
@@ -250,7 +358,10 @@ class WeightedVoter:
     _MIN_SAMPLES = 30
 
     def update_weight(self, source: str, correct: bool):
-        """Monitor 模块调用：根据历史准确率动态调整权重（带冷启动门槛）"""
+        """根据显式标注更新进程内权重；当前在线请求路径没有自动调用此方法。"""
+        if source not in self._accuracy_tracker:
+            logger.warning("忽略未知意图通道的反馈: %s", source)
+            return
         tracker = self._accuracy_tracker[source]
         tracker["total"] += 1.0
         if correct:
@@ -307,6 +418,7 @@ class WeightedVoter:
             rule_result.intent in BUSINESS_INTENTS
             and rule_result.confidence >= 0.99
             and llm_result.intent not in BUSINESS_INTENTS
+            and llm_result.intent not in {"complex_task", "explore_research"}
             and llm_result.intent != "unknown"
         ):
             return FusionResult(
@@ -338,17 +450,17 @@ class WeightedVoter:
             return FusionResult(
                 intent="unknown",
                 confidence=0.0,
-                clarifying_question="抱歉，我没有理解您的意思。您是想查询数据、分析趋势，还是其他需求？",
+                clarifying_question="我还不确定你的需求。你可以补充想查的对象、时间范围，或希望完成的任务。",
             )
 
         best_intent = max(scores, key=scores.get)
         best_score = scores[best_intent]
 
-        if best_score < self.threshold:
+        if best_intent == "unknown" or best_score < self.threshold:
             return FusionResult(
                 intent="unknown",
                 confidence=best_score,
-                clarifying_question=f"您的请求我不太确定，是想了解'{best_intent}'相关的内容吗？",
+                clarifying_question="我还不确定你的需求。你可以补充想查的对象、时间范围，或希望完成的任务。",
             )
 
         return FusionResult(intent=best_intent, confidence=best_score)
@@ -364,21 +476,56 @@ class IntentRecognizer:
         self.history_recognizer = HistoryPatternRecognizer()
         self.voter = WeightedVoter()
 
+    _FAST_PATHS = (
+        (re.compile(r"^(你好|您好|嗨|hello|hi|在吗|在嘛)[!！?？。 ]*$", re.IGNORECASE), "greeting"),
+        (re.compile(r"^(谢谢|感谢|再见|拜拜|好的|ok|知道了)[!！?？。 ]*$", re.IGNORECASE), "chitchat"),
+    )
+
+    @classmethod
+    def _fast_path_result(cls, query: str) -> Optional[IntentResult]:
+        normalized = query.strip()
+        for pattern, intent in cls._FAST_PATHS:
+            if pattern.fullmatch(normalized):
+                return IntentResult(intent=intent, confidence=1.0, source="rule")
+        return None
+
     async def recognize(
-        self, query: str, session_id: str
+        self,
+        query: str,
+        session_id: str,
+        *,
+        tenant_id: str = "default",
+        user_id: int = 0,
+        fallback_query: Optional[str] = None,
     ) -> Tuple[str, float, Optional[str]]:
         """
         返回: (intent, confidence, clarifying_question)
         clarifying_question 为 None 表示识别成功
         """
-        # 三路真正并行识别：LLM 与历史通道用 gather 并发，
-        # 整体延迟 = max(各路) 而非 sum（规则通道是本地正则，微秒级）
+        history_key = _history_scope_key(session_id, tenant_id, user_id)
+        fast_result = self._fast_path_result(query)
+        if fast_result:
+            self.history_recognizer.record_intent(history_key, fast_result.intent, query=query)
+            return fast_result.intent, fast_result.confidence, None
+
+        # 历史向量只对追问启用；独立问题不额外付出一次 Embedding 调用。
         import asyncio
         rule_result = self.rule_recognizer.recognize(query)
-        llm_result, history_result = await asyncio.gather(
-            self.llm_recognizer.recognize(query),
-            self.history_recognizer.recognize(query, session_id),
-        )
+        contextual_query = (fallback_query or "").strip()
+        if (
+            not contextual_query
+            or contextual_query == query.strip()
+            or not self.history_recognizer._is_context_dependent(query)
+        ):
+            contextual_query = None
+        if self.history_recognizer._is_context_dependent(query):
+            llm_result, history_result = await asyncio.gather(
+                self.llm_recognizer.recognize(query, contextual_query=contextual_query),
+                self.history_recognizer.recognize(query, history_key),
+            )
+        else:
+            llm_result = await self.llm_recognizer.recognize(query)
+            history_result = IntentResult(intent="unknown", confidence=0.0, source="history")
 
         logger.info(
             f"意图识别结果: rule={rule_result.intent}({rule_result.confidence:.2f}), "
@@ -391,7 +538,7 @@ class IntentRecognizer:
 
         # 记录历史（带原始 query，供历史通道做语义相似度）
         if fusion.intent != "unknown":
-            self.history_recognizer.record_intent(session_id, fusion.intent, query=query)
+            self.history_recognizer.record_intent(history_key, fusion.intent, query=query)
 
         return fusion.intent, fusion.confidence, fusion.clarifying_question
 

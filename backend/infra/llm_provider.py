@@ -48,6 +48,12 @@ def create_chat_model(model_name: Optional[str] = None,
     """
     global _CATPAWCLI_WARNED
     from langchain_openai import ChatOpenAI
+    from infra.llm_usage import UsageCallback
+
+    configured_callbacks = kwargs.pop("callbacks", None) or []
+    callbacks = list(configured_callbacks)
+    if not any(isinstance(item, UsageCallback) for item in callbacks):
+        callbacks.append(UsageCallback())
 
     if LLM_PROVIDER == "catpawcli":
         base_url = os.getenv("CATPAW_PROXY_URL", "http://127.0.0.1:18766/v1")
@@ -61,6 +67,7 @@ def create_chat_model(model_name: Optional[str] = None,
             openai_api_key=api_key,
             openai_api_base=base_url,
             temperature=temperature,
+            callbacks=callbacks,
             **{k: v for k, v in kwargs.items() if v is not None},
         )
 
@@ -69,5 +76,6 @@ def create_chat_model(model_name: Optional[str] = None,
         openai_api_key=os.getenv("DASHSCOPE_API_KEY"),
         openai_api_base=os.getenv("BASE_URL"),
         temperature=temperature,
+        callbacks=callbacks,
         **{k: v for k, v in kwargs.items() if v is not None},
     )

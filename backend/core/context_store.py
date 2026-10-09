@@ -13,8 +13,8 @@
 回忆；本项目无沙箱，文件存本地 data 目录、用结构化工具调用回忆——
 "延迟加载"的思想一致，执行载体适配客服场景。
 
-存储路径：backend/data/context_store/{ref_id}.json（含元数据）
-清理策略：save 时清理 7 天前的过期文件，防止无限膨胀。
+存储路径：data/context_store/{ref_id}.ctx（加密内容及归属元数据）
+清理策略：每小时最多扫描一次，读取时也拒绝过期内容。
 """
 
 import json
@@ -22,8 +22,12 @@ import os
 import re
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
+
+from cryptography.fernet import Fernet, InvalidToken
 
 import logging
 
@@ -35,8 +39,31 @@ CONTEXT_STORE_DIR = Path(os.getenv("CONTEXT_STORE_DIR", "./data/context_store"))
 # 过期清理阈值（秒）
 EXPIRE_SECONDS = 7 * 24 * 3600
 
-# 单文件大小上限（字符），超过则拒绝存储（防御性，正常工具结果不会超）
+# 单文件大小上限（字符），超出部分会被截断。
 MAX_CONTENT_CHARS = 2_000_000
+
+# Only the server sets this identity. It is never accepted from tool arguments.
+_request_identity: ContextVar[Optional[tuple[int, str, str]]] = ContextVar(
+    "context_store_identity", default=None
+)
+
+
+@contextmanager
+def context_identity(user_id: int, tenant_id: str, session_id: str):
+    if user_id < 0 or not session_id:
+        raise ValueError("上下文存档需要有效的用户和会话")
+    token = _request_identity.set((user_id, tenant_id or "", session_id))
+    try:
+        yield
+    finally:
+        _request_identity.reset(token)
+
+
+def _cipher() -> Fernet:
+    key = os.getenv("CONTEXT_STORE_FERNET_KEY", "").strip()
+    if not key:
+        raise RuntimeError("CONTEXT_STORE_FERNET_KEY 未配置，拒绝明文存档")
+    return Fernet(key.encode("ascii"))
 
 
 class ContextStore:
@@ -55,44 +82,73 @@ class ContextStore:
             return
         CONTEXT_STORE_DIR.mkdir(parents=True, exist_ok=True)
         self._initialized = True
+        self._last_cleanup = 0.0
         self._cleanup_expired()
+        self._warn_legacy_plaintext()
+
+    def _warn_legacy_plaintext(self):
+        """Legacy archives have no trustworthy owner metadata; never migrate or serve them."""
+        try:
+            count = sum(1 for _ in CONTEXT_STORE_DIR.glob("ctx_*.json"))
+            if count:
+                logger.warning(
+                    "发现 %s 个旧版明文上下文存档。它们没有用户/租户归属，"
+                    "新版本不会读取；请由管理员按数据保留策略处理。", count
+                )
+        except Exception as exc:
+            logger.warning("旧版上下文存档检查失败: %s", exc)
 
     def _path(self, ref_id: str) -> Path:
         # 防 path traversal：ref_id 只允许 ctx_ + 十六进制
-        if not re.fullmatch(r"ctx_[0-9a-f]{8,12}", ref_id):
+        if not re.fullmatch(r"ctx_[0-9a-f]{20}", ref_id):
             raise ValueError(f"非法 ref_id: {ref_id}")
-        return CONTEXT_STORE_DIR / f"{ref_id}.json"
+        return CONTEXT_STORE_DIR / f"{ref_id}.ctx"
 
     def _cleanup_expired(self):
         """清理过期文件，失败不阻塞主流程"""
         try:
             now = time.time()
             removed = 0
-            for p in CONTEXT_STORE_DIR.glob("ctx_*.json"):
+            for p in CONTEXT_STORE_DIR.glob("ctx_*.ctx"):
                 if now - p.stat().st_mtime > EXPIRE_SECONDS:
                     p.unlink(missing_ok=True)
                     removed += 1
             if removed:
                 logger.info(f"ContextStore 清理过期文件 {removed} 个")
+            self._last_cleanup = now
         except Exception as e:
             logger.warning(f"ContextStore 清理失败（非阻塞）: {e}")
 
     def save(self, content: str, source: str = "unknown", query: str = "") -> str:
         """保存完整内容，返回 ref_id"""
+        identity = _request_identity.get()
+        if identity is None or identity[0] <= 0:
+            raise PermissionError("缺少可信请求身份，拒绝存档")
+        cipher = _cipher()
         if len(content) > MAX_CONTENT_CHARS:
             content = content[:MAX_CONTENT_CHARS] + "\n...[存储时截断]"
-        ref_id = f"ctx_{uuid.uuid4().hex[:10]}"
+        if time.time() - self._last_cleanup > 3600:
+            self._cleanup_expired()
+        ref_id = f"ctx_{uuid.uuid4().hex[:20]}"
         record = {
             "ref_id": ref_id,
+            "user_id": identity[0],
+            "tenant_id": identity[1],
+            "session_id": identity[2],
             "source": source,          # 来源：tool_result / transcript / image 等
             "query": query[:200],       # 触发该内容的查询（便于模型判断相关性）
             "content": content,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "chars": len(content),
         }
-        self._path(ref_id).write_text(
-            json.dumps(record, ensure_ascii=False), encoding="utf-8"
-        )
+        payload = cipher.encrypt(json.dumps(record, ensure_ascii=False).encode("utf-8"))
+        path = self._path(ref_id)
+        temp_path = path.with_suffix(".tmp")
+        try:
+            temp_path.write_bytes(payload)
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         logger.info(f"ContextStore 已存档: {ref_id} ({len(content)} chars, source={source})")
         return ref_id
 
@@ -112,11 +168,23 @@ class ContextStore:
         - grep:  按正则过滤相关行（精确定位）
         """
         path = self._path(ref_id)
+        identity = _request_identity.get()
+        if identity is None or identity[0] <= 0:
+            raise PermissionError("缺少可信请求身份，拒绝取回")
         if not path.exists():
             return json.dumps(
                 {"error": f"ref_id {ref_id} 不存在或已过期"}, ensure_ascii=False
             )
-        record = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - path.stat().st_mtime > EXPIRE_SECONDS:
+            path.unlink(missing_ok=True)
+            return json.dumps({"error": "引用已过期"}, ensure_ascii=False)
+        try:
+            record = json.loads(_cipher().decrypt(path.read_bytes()).decode("utf-8"))
+        except (InvalidToken, ValueError, UnicodeDecodeError) as exc:
+            logger.warning("上下文存档解密失败: %s", ref_id)
+            raise ValueError("上下文存档无法解密") from exc
+        if (record.get("user_id"), record.get("tenant_id"), record.get("session_id")) != identity:
+            raise PermissionError("无权读取此上下文")
         content = record["content"]
 
         if mode == "tail":
@@ -176,6 +244,29 @@ class ContextStore:
             {"ref_id": ref_id, "mode": "full", "content": content},
             ensure_ascii=False,
         )
+
+    def delete_session_archives(self) -> int:
+        """Delete encrypted archives owned by the trusted current session."""
+        identity = _request_identity.get()
+        if identity is None or identity[0] <= 0:
+            raise PermissionError("缺少可信请求身份，拒绝删除上下文存档")
+        removed = 0
+        for path in CONTEXT_STORE_DIR.glob("ctx_*.ctx"):
+            try:
+                record = json.loads(_cipher().decrypt(path.read_bytes()).decode("utf-8"))
+                owner = (
+                    record.get("user_id"),
+                    record.get("tenant_id"),
+                    record.get("session_id"),
+                )
+                if owner == identity:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except (InvalidToken, ValueError, UnicodeDecodeError, OSError) as exc:
+                # Without verifiable metadata, a file cannot safely be attributed
+                # to this caller and is therefore retained for administrator review.
+                logger.warning("无法验证上下文归属，保留存档文件 %s: %s", path.name, exc)
+        return removed
 
 
 def get_context_store() -> ContextStore:

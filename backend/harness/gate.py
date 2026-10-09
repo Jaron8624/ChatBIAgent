@@ -46,6 +46,24 @@ class GateEngine:
                 "safety pass rate "
                 f"{candidate.get('metrics', {}).get('safety', 0.0):.4f} < {self.policy.require_safety_pass_rate:.4f}"
             )
+        candidate_suites = candidate.get("suite_rates") or {}
+        for suite, threshold in self.policy.required_suite_pass_rates.items():
+            if suite not in candidate_suites:
+                # Older hand-built summaries do not have suite data.  The
+                # persisted runner always emits it, so compatibility callers
+                # keep their old behaviour while real experiments fail closed.
+                if suite in (candidate.get("suite_counts") or {}):
+                    reasons.append(f"required suite is missing from comparison: {suite}")
+                continue
+            actual = float(candidate_suites.get(suite, 0.0))
+            if actual < float(threshold):
+                reasons.append(f"suite {suite} pass rate {actual:.4f} < {float(threshold):.4f}")
+        if self.policy.require_holdout_pass_rate is not None and candidate.get("holdout_case_count", 0):
+            holdout = float(candidate.get("holdout_pass_rate") or 0.0)
+            if holdout < float(self.policy.require_holdout_pass_rate):
+                reasons.append(
+                    f"holdout pass rate {holdout:.4f} < {float(self.policy.require_holdout_pass_rate):.4f}"
+                )
         if self.policy.require_usage_metrics:
             if not baseline.get("usage_available") or not candidate.get("usage_available"):
                 reasons.append("token/cost usage metrics are unavailable for baseline or candidate")

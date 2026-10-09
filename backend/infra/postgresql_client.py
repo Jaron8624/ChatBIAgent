@@ -208,16 +208,49 @@ class PostgreSQLParentClient:
                         id VARCHAR(50) PRIMARY KEY,
                         user_id INT NOT NULL,
                         thread_id VARCHAR(50) NOT NULL,
+                        tenant_id VARCHAR(160) NOT NULL DEFAULT 'default',
+                        turn_id VARCHAR(64),
                         summary_id VARCHAR(50) NULL,
                         role VARCHAR(10) NOT NULL,
                         content TEXT NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
 
+                    ALTER TABLE raw_conversations
+                        ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(160) NOT NULL DEFAULT 'default';
+                    ALTER TABLE raw_conversations
+                        ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64);
+
                     -- 独立创建索引，加速查询
                     CREATE INDEX IF NOT EXISTS idx_user_created ON raw_conversations(user_id, created_at); -- 加速查询：查询某用户的所有对话
                     CREATE INDEX IF NOT EXISTS idx_thread_created ON raw_conversations(thread_id, created_at); -- 加速查询：查询某会话的所有对话
+                    CREATE INDEX IF NOT EXISTS idx_raw_conversation_scope
+                        ON raw_conversations(tenant_id, user_id, thread_id, summary_id);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_conversation_turn_role
+                        ON raw_conversations(tenant_id, user_id, thread_id, turn_id, role)
+                        WHERE turn_id IS NOT NULL;
                     CREATE INDEX IF NOT EXISTS idx_summary_id ON raw_conversations(summary_id);    -- 加速查询：根据摘要ID查找所有对话
+
+                    -- 会话归属登记只保存身份和生命周期，不保存聊天正文。
+                    -- Redis 快照过期后仍可核验删除请求，并阻止已删除会话被重新写入。
+                    CREATE TABLE IF NOT EXISTS nexusmind_session_registry (
+                        session_id VARCHAR(128) PRIMARY KEY,
+                        user_id INT NOT NULL,
+                        tenant_id VARCHAR(160) NOT NULL DEFAULT 'default',
+                        status VARCHAR(16) NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'deleted')),
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        deleted_at TIMESTAMP NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_nexusmind_session_owner
+                        ON nexusmind_session_registry(tenant_id, user_id, updated_at DESC);
+
+                    -- 为升级前仍有原始对话的会话补登记，便于 Redis 过期后的删除校验。
+                    INSERT INTO nexusmind_session_registry(session_id, user_id, tenant_id)
+                    SELECT DISTINCT thread_id, user_id, COALESCE(tenant_id, 'default')
+                    FROM raw_conversations
+                    ON CONFLICT (session_id) DO NOTHING;
                     """
                     )
                     # 为5个表创建6个索引，加速多表关联查询和过滤操作
@@ -832,6 +865,68 @@ class PostgreSQLParentClient:
             logger.error(f"Error adding conversation message: {e}")
             raise
 
+    async def add_conversation_turn(
+        self,
+        user_id: int,
+        tenant_id: str,
+        thread_id: str,
+        turn_id: str,
+        query: str,
+        answer: str,
+    ) -> None:
+        """Persist a completed turn atomically for the background memory extractor."""
+        if user_id <= 0:
+            return
+        if not self.pool:
+            raise RuntimeError("Connection pool not initialized")
+        if not thread_id or len(thread_id) > 50 or not turn_id or len(turn_id) > 64:
+            raise ValueError("会话或轮次标识无效")
+
+        rows = (
+            (str(uuid.uuid4()), "human", str(query)[:20000]),
+            (str(uuid.uuid4()), "ai", str(answer)[:20000]),
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for message_id, role, content in rows:
+                    await conn.execute(
+                        """
+                        INSERT INTO raw_conversations
+                            (id, user_id, thread_id, tenant_id, turn_id, role, content)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (tenant_id, user_id, thread_id, turn_id, role)
+                        WHERE turn_id IS NOT NULL DO NOTHING
+                        """,
+                        message_id,
+                        user_id,
+                        thread_id,
+                        str(tenant_id or "default")[:160],
+                        turn_id,
+                        role,
+                        content,
+                    )
+
+    async def delete_conversation_thread(
+        self, user_id: int, tenant_id: str, thread_id: str
+    ) -> int:
+        """Delete raw transcript rows for the authenticated tenant/user/session only."""
+        if not self.pool:
+            raise RuntimeError("Connection pool not initialized")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM raw_conversations
+                WHERE user_id = $1 AND tenant_id = $2 AND thread_id = $3
+                """,
+                user_id,
+                str(tenant_id or "default"),
+                thread_id,
+            )
+        try:
+            return int(result.rsplit(" ", 1)[-1])
+        except (ValueError, AttributeError):
+            return 0
+
     async def update_messages_with_summary_id(
         self, message_ids: List[str], summary_id: str
     ) -> bool:
@@ -872,7 +967,7 @@ class PostgreSQLParentClient:
             redis_client = await get_redis_client()
             cache_key = f"user_profile:{user_id}"
             
-            # AsyncRedisSaver 底层是 redis.asyncio.Redis
+            # 用户画像缓存通过共享的异步 Redis 客户端读取。
             cached_profile = await redis_client.get(cache_key)
             if cached_profile:
                 logger.info(f"用户画像查询（Redis 缓存命中）user_id={user_id}")
@@ -951,7 +1046,11 @@ class PostgreSQLParentClient:
             return False
 
     async def get_raw_conversation_by_summary_id(
-        self, summary_id: str, user_id: int, thread_id: str
+        self,
+        summary_id: str,
+        user_id: int,
+        thread_id: str,
+        tenant_id: str = "default",
     ) -> str:
         """
         通过 summary_id 检索对话，并返回格式化的原始对话文本
@@ -982,11 +1081,13 @@ class PostgreSQLParentClient:
                     WHERE summary_id = $1 
                     AND user_id = $2 
                     AND thread_id = $3
+                    AND tenant_id = $4
                     ORDER BY created_at ASC
                     """,
                     summary_id,
                     user_id,
                     thread_id,
+                    str(tenant_id or "default"),
                 )
 
                 if not rows:
@@ -1013,11 +1114,79 @@ class PostgreSQLParentClient:
                 result = f"以下是summary_id={summary_id}对应的原始对话记录:\n" + "\n".join(formatted_lines)
                 logger.info(f"成功查询到 summary_id={summary_id} 对应的原始对话记录，共 {len(rows)} 条消息")
 
-                return result
+            return result
 
         except Exception as e:
             logger.error(f"通过 summary_id 检索并格式化对话失败: {e}")
             return f"通过 summary_id 检索对话失败: {e}"
+
+    async def register_session_owner(
+        self, session_id: str, user_id: int, tenant_id: str = "default"
+    ) -> bool:
+        """Create/update minimal durable ownership metadata unless the session was deleted."""
+        if not self.pool:
+            raise RuntimeError("Connection pool not initialized")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO nexusmind_session_registry
+                    (session_id, user_id, tenant_id, status, updated_at)
+                VALUES ($1, $2, $3, 'active', CURRENT_TIMESTAMP)
+                ON CONFLICT (session_id) DO UPDATE
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE nexusmind_session_registry.user_id = EXCLUDED.user_id
+                      AND nexusmind_session_registry.tenant_id = EXCLUDED.tenant_id
+                      AND nexusmind_session_registry.status = 'active'
+                RETURNING session_id
+                """,
+                session_id,
+                user_id,
+                tenant_id or "default",
+            )
+        return row is not None
+
+    async def get_session_registry_status(
+        self, session_id: str, user_id: int, tenant_id: str = "default"
+    ) -> Optional[str]:
+        """Return active/deleted for the owner, owner_mismatch for another identity, or None."""
+        if not self.pool:
+            raise RuntimeError("Connection pool not initialized")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, tenant_id, status
+                FROM nexusmind_session_registry
+                WHERE session_id = $1
+                """,
+                session_id,
+            )
+        if row is None:
+            return None
+        if row["user_id"] != user_id or row["tenant_id"] != (tenant_id or "default"):
+            return "owner_mismatch"
+        return row["status"]
+
+    async def mark_session_deleted(
+        self, session_id: str, user_id: int, tenant_id: str = "default"
+    ) -> bool:
+        """Persist an owner-checked deletion tombstone; safe to retry after partial cleanup."""
+        if not self.pool:
+            raise RuntimeError("Connection pool not initialized")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE nexusmind_session_registry
+                SET status = 'deleted',
+                    deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE session_id = $1 AND user_id = $2 AND tenant_id = $3
+                RETURNING session_id
+                """,
+                session_id,
+                user_id,
+                tenant_id or "default",
+            )
+        return row is not None
 
 
 # 测试函数

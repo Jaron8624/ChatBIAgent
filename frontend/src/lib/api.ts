@@ -7,7 +7,7 @@ export interface ApiCtx {
   role: string
 }
 
-let ctx: ApiCtx = { userId: 1, role: 'admin' }
+let ctx: ApiCtx = { userId: 1, role: 'guest' }
 
 export function setApiContext(c: Partial<ApiCtx>) {
   ctx = { ...ctx, ...c }
@@ -65,6 +65,7 @@ export interface StreamEvent {
   error?: string
   spans?: Record<string, unknown>[]
   model_used?: string
+  session_id?: string
   option?: Record<string, unknown>
 }
 

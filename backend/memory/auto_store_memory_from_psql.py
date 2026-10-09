@@ -1,13 +1,10 @@
-"""
-定时自动压缩psql中的历史对话，压缩函数提取的是langchain中的SummarizationMiddleware，
-压缩时检查对话是否超过4000个token，超过则压缩，否则不压缩。
-新增逻辑：大模型识别后半部分语义差异大且不完整的消息，仅压缩前半部分相关内容，返回过滤的消息ID列表
-"""
+"""Background memory extraction with persisted batches and retry-safe writes."""
 
 import asyncio
 import logging
 import uuid
 import json
+import math
 from typing import List, Dict, Any
 from datetime import datetime
 import infra.config as config
@@ -19,10 +16,12 @@ from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_
 from infra.llm_provider import create_chat_model
 from rag.milvus_client import get_milvus_client
 import os
+from memory.policy import validated_items, should_extract, batch_id
+from memory.ingestion_ledger import IngestionLedger, memory_write_lock
 
 logger = logging.getLogger(__name__)
 
-TOKEN_THRESHOLD = 1000  # 中间件压缩的是10000token，可根据交流频率自由调整
+TOKEN_THRESHOLD = int(os.getenv("MEMORY_EXTRACT_TOKEN_THRESHOLD", "1000"))
 MEMORY_EXTRACT_PROMPT = config.MEMORY_EXTRACT_PROMPT
 USER_PROFILE_MERGE_PROMPT = config.USER_PROFILE_MERGE_PROMPT
 
@@ -30,6 +29,8 @@ USER_PROFILE_MERGE_PROMPT = config.USER_PROFILE_MERGE_PROMPT
 async def extract_memories(
     messages: List[Dict[str, Any]],
     model: BaseChatModel,
+    attribute_keys=None,
+    _retry=False,
 ) -> Dict[str, Any]:
     """
     从对话中提取多种类型的记忆
@@ -72,7 +73,17 @@ async def extract_memories(
             HumanMessage(
                 content=MEMORY_EXTRACT_PROMPT.format(
                     conversation_text=conversation_text
-                )
+                ) + "\n附加输出规则：三类记忆的每条对象补充source_message_ids（原始消息ID字符串数组）、"
+                "source_quote（来自用户消息的逐字原文，没有则为空）和memory_key。"
+                "memory_key只用于用户明确陈述的稳定偏好或属性，例如preference.report_period。"
+                "同一属性不同值必须用相同key，不把值、日期或会话ID放进key。其他知识、经历、"
+                "方法无稳定属性时key为空。AI提出但用户未确认的内容不得冒充用户事实。"
+                "每个稳定属性单独生成一条semantic_memory，不把汇总周期、币种、语言合并在同一条中。"
+                "每条记忆必须包含content、importance_score、source_message_ids、source_quote、memory_key五个字段。"
+                "source_message_ids只能从待分析对话复制，不可编造或使用示例ID。source_quote必须逐字复制用户原文。"
+                "下面已有属性仅供命名对齐，不是本次新的事实证据。相同属性必须复用既有memory_key。"
+                + json.dumps(attribute_keys or [], ensure_ascii=False)
+                + ('\n上次输出缺少有效来源字段。本次务必补齐所有来源字段，否则系统不会保存。' if _retry else '')
             )
         ]
     )
@@ -86,47 +97,56 @@ async def extract_memories(
         content = content[:-3]
 
     result = json.loads(content.strip())
+    if not isinstance(result, dict):
+        raise ValueError("memory extraction must return an object")
+    invalid_sources = False
+    for field in ("semantic_memory", "episodic_memory", "procedural_memory"):
+        raw = result.get(field, [])
+        if not isinstance(raw, list):
+            invalid_sources = True
+            continue
+        for item in raw:
+            parsed = validated_items([item], messages)
+            if not parsed or not parsed[0]["source_message_ids"] or (
+                item.get("memory_key") and not parsed[0]["memory_key"]
+            ):
+                invalid_sources = True
+    if invalid_sources:
+        if not _retry:
+            return await extract_memories(messages, model, attribute_keys, _retry=True)
+        raise ValueError("memory_extraction_invalid_provenance")
 
     # 解析结果
     def safe_score(v):
         try:
-            return round(
-                max(0.0, min(1.0, float(v))), 1
-            )  # 将importance_score安全地限制在 0.0 到 1.0 之间，并保留 1 位小数
-        except:
+            value = float(v)
+            return round(max(0.0, min(1.0, value)), 1) if math.isfinite(value) else 0.5
+        except (TypeError, ValueError):
             return 0.5
 
-    # 解析记忆项，确保 content 字段存在且非空字符串
-    def parse_items(items):
-        if not isinstance(items, list):
-            return []
-        return [
-            {
-                "content": item["content"].strip(),
-                "importance_score": safe_score(item.get("importance_score", 0.5)),
-            }
-            for item in items
-            if isinstance(item, dict)
-            and item.get("content", "").strip()  # 确保 content 字段存在且非空字符串
-        ]
-
     summary_raw = result.get("summary", {})
+    if not isinstance(summary_raw, dict):
+        summary_raw = {}
+    filtered = result.get("filtered_message_ids", [])
+    if not isinstance(filtered, list):
+        filtered = []
 
     return {
         "summary": {
-            "content": summary_raw.get("content", "").strip(),
+            "content": str(summary_raw.get("content") or "").strip(),
             "importance_score": safe_score(summary_raw.get("importance_score", 0.5)),
         },
-        "semantic_memory": parse_items(result.get("semantic_memory")),
-        "episodic_memory": parse_items(result.get("episodic_memory")),
-        "procedural_memory": parse_items(result.get("procedural_memory")),
-        "user_profile": result.get("user_profile", "").strip(),
-        "filtered_message_ids": result.get("filtered_message_ids", []),
+        "semantic_memory": validated_items(result.get("semantic_memory"), messages),
+        "episodic_memory": validated_items(result.get("episodic_memory"), messages),
+        "procedural_memory": validated_items(result.get("procedural_memory"), messages),
+        "user_profile": str(result.get("user_profile") or "").strip(),
+        "filtered_message_ids": [str(i) for i in filtered
+                                 if str(i) in {str(m["id"]) for m in messages}],
     }
 
 
 async def get_unsunmarized_conversations(
-    user_id: int, thread_id: str
+    user_id: int, thread_id: str, tenant_id: str = "default"
 ) -> List[Dict[str, Any]]:
     """获取指定用户和会话中未摘要的对话消息"""
     try:
@@ -143,11 +163,13 @@ async def get_unsunmarized_conversations(
                 FROM raw_conversations
                 WHERE user_id = $1 
                 AND thread_id = $2
+                AND tenant_id = $3
                 AND (summary_id IS NULL OR summary_id = '')
                 ORDER BY created_at ASC
             """,
                 user_id,
                 thread_id,
+                str(tenant_id or "default"),
             )
 
             messages = [dict(row) for row in rows]
@@ -166,8 +188,34 @@ async def get_unsunmarized_conversations(
 
 # 这个才是存入记忆的关键
 async def extract_and_append_memory(
-    messages: List[Dict[str, Any]], model: BaseChatModel, user_id: int, thread_id: str
+    messages: List[Dict[str, Any]],
+    model: BaseChatModel,
+    user_id: int,
+    thread_id: str,
+    tenant_id: str = "default",
 ) -> Dict[str, Any]:
+    """Serialize user memory updates, reload sources and resume a prepared batch."""
+    pg_client = await get_postgresql_client()
+    tenant_id = str(tenant_id or "default")
+    try:
+        async with memory_write_lock(pg_client.pool, user_id, tenant_id) as conn:
+            ledger = IngestionLedger(conn)
+            await ledger.ensure_schema()
+            if not await ledger.active(user_id, tenant_id, thread_id):
+                await ledger.cancel_session(user_id, tenant_id, thread_id)
+                return {"success": False, "reason": "会话已删除或归属不匹配"}
+            pending = await ledger.pending(user_id, tenant_id)
+            if pending:
+                return await _deliver_batch(pending[0], pending[1], ledger, pg_client)
+            # Another process may have processed these messages while we waited.
+            messages = await get_unsunmarized_conversations(user_id, thread_id, tenant_id)
+            return await _extract_locked(messages, model, user_id, thread_id, tenant_id, ledger)
+    except Exception as error:
+        logger.error("记忆批次处理失败: %s", type(error).__name__)
+        return {"success": False, "reason": type(error).__name__}
+
+
+async def _extract_locked(messages, model, user_id, thread_id, tenant_id, ledger):
     """压缩单个会话的消息并生成摘要"""
     if not messages:
         return {"success": False, "reason": "没有消息需要压缩"}
@@ -178,7 +226,8 @@ async def extract_and_append_memory(
     )
     total_tokens = count_tokens_approximately([HumanMessage(content=conversation_text)])
 
-    if total_tokens <= TOKEN_THRESHOLD:
+    if not should_extract(messages, total_tokens, TOKEN_THRESHOLD,
+                          int(os.getenv("MEMORY_EXTRACT_IDLE_SECONDS", "900"))):
         return {
             "success": False,
             "reason": f"token 数未超过阈值 ({total_tokens} <= {TOKEN_THRESHOLD})",
@@ -188,7 +237,9 @@ async def extract_and_append_memory(
 
     # 2. 提取记忆
     try:
-        extract_result = await extract_memories(messages, model)
+        milvus = await get_milvus_client()
+        attributes = await milvus.get_memory_attribute_keys(user_id, tenant_id)
+        extract_result = await extract_memories(messages, model, attributes)
     except Exception as e:
         logger.error(f"记忆提取失败: {e}", exc_info=True)
         return {
@@ -209,6 +260,8 @@ async def extract_and_append_memory(
             total_tokens=total_tokens,
             filtered_message_ids=filtered_message_ids,
             model=model,
+            tenant_id=tenant_id,
+            ledger=ledger,
         )
     except Exception as e:
         logger.error(f"存储记忆失败: {e}", exc_info=True)
@@ -222,158 +275,82 @@ async def extract_and_append_memory(
 
 
 async def _store_memories(
-    messages: List[Dict[str, Any]],
-    extract_result: Dict[str, Any],
-    user_id: int,
-    thread_id: str,
-    total_tokens: int,
-    filtered_message_ids: List[str],
-    model: BaseChatModel,
-) -> Dict[str, Any]:
-    """存储记忆到 PostgreSQL 和 Milvus，任何一项失败都不提交数据"""
-    milvus_client = await get_milvus_client()
-    pg_client = await get_postgresql_client()
+    messages, extract_result, user_id, thread_id, total_tokens,
+    filtered_message_ids, model, tenant_id="default", ledger=None,
+):
+    """Freeze the exact write plan before touching either destination."""
+    if ledger is None:
+        raise RuntimeError("memory ingestion requires a durable ledger and scope lock")
+    milvus = await get_milvus_client()
+    pg = await get_postgresql_client()
+    excluded = {str(i) for i in filtered_message_ids}
+    ids = [str(m["id"]) for m in messages if str(m["id"]) not in excluded]
+    if not ids:
+        return {"success": False, "reason": "所有消息都被过滤"}
+    # Do not persist claims sourced from excluded/incomplete messages.
+    memories = {"summary": {} if excluded else (extract_result.get("summary") or {})}
+    for key in ("semantic_memory", "episodic_memory", "procedural_memory"):
+        memories[key] = [
+            dict(item) for item in extract_result.get(key, [])
+            if not excluded.intersection(item.get("source_message_ids", []))
+            and (not excluded or item.get("source_message_ids"))
+        ]
+    memories = await milvus.resolve_conflicts(memories, user_id, tenant_id)
+    profile = extract_result.get("user_profile", "") if tenant_id == "default" and not excluded else ""
+    if profile:
+        old_profile = await pg.get_user_profile(user_id)
+        response = await model.ainvoke([HumanMessage(content=USER_PROFILE_MERGE_PROMPT.format(
+            old_user_profile=old_profile, new_user_profile=profile,
+        ))])
+        profile = str(response.content).strip()
+    batch = batch_id(user_id, tenant_id, thread_id, messages)
+    summary = str(uuid.uuid5(uuid.NAMESPACE_URL, batch))
+    payload = {
+        "user_id": user_id, "tenant_id": tenant_id, "thread_id": thread_id,
+        "summary_id": summary, "message_ids": ids, "memories": memories,
+        "profile": profile, "token_count": total_tokens,
+        "message_count": len(messages),
+    }
+    await ledger.prepare(batch, user_id, tenant_id, thread_id, payload)
+    return await _deliver_batch(batch, payload, ledger, pg)
 
-    new_user_profile = extract_result.get("user_profile", "")
-    summary_id = str(uuid.uuid4())
 
-    # 查询旧画像（用于回滚和画像补充）
-    old_user_profile = await pg_client.get_user_profile(user_id)
-
-    # 确定需要更新的消息ID
-    all_message_ids = [str(msg["id"]) for msg in messages]
-    update_message_ids = [
-        mid for mid in all_message_ids if mid not in filtered_message_ids
-    ]
-
-    if not update_message_ids:
-        logger.warning(f"会话 {thread_id} 所有消息都被过滤")
-        return {
-            "success": False,
-            "reason": "所有消息都被过滤",
-            "token_count": total_tokens,
-            "message_count": len(messages),
-        }
-
-    # 准备数据
-    keep_keys = ["summary", "semantic_memory", "episodic_memory", "procedural_memory"]
-    filtered_memory = {k: v for k, v in extract_result.items() if k in keep_keys}
-    """
-    filtered_memory =  {
-            "summary": {"content": str, "importance_score": float},
-            "semantic_memory": [{"content": str, "importance_score": float}, ...],
-            "episodic_memory": [{"content": str, "importance_score": float}, ...],
-            "procedural_memory": [{"content": str, "importance_score": float}, ...],
-            "user_profile": str,
-            "filtered_message_ids": list
-        }
-    """
-    # 检测冲突记忆（删除相似度高于0.9的记忆）
-    filtered_memory = await milvus_client.resolve_conflicts(
-        filtered_memory=filtered_memory, user_id=user_id
-    )
-
-    #使用小模型对新旧用户画像进行补充
-    if new_user_profile:
-        response = await model.ainvoke(
-            [
-                HumanMessage(
-                    content=USER_PROFILE_MERGE_PROMPT.format(
-                        old_user_profile=old_user_profile,
-                        new_user_profile=new_user_profile,
-                    )
-                )
-            ]
-        )
-        # 只需要这一行！纯文本画像直接用
-        new_user_profile = response.content.strip()
-
+async def _deliver_batch(batch, payload, ledger, pg):
+    """Retry identical vector writes; acknowledge only after they succeed."""
+    uid, tenant, thread = payload["user_id"], payload["tenant_id"], payload["thread_id"]
+    milvus = await get_milvus_client()
     try:
-        # 1. 更新 summary_id
-        summary_success = await pg_client.update_messages_with_summary_id(
-            update_message_ids, summary_id
+        if not await ledger.active(uid, tenant, thread):
+            await ledger.cancel_session(uid, tenant, thread)
+            return {"success": False, "reason": "会话已删除或归属不匹配"}
+        ok = await milvus.add_memories_batch(
+            user_id=uid, thread_id=thread, tenant_id=tenant,
+            memory_dict=payload["memories"], summary_id=payload["summary_id"],
+            batch_id=batch, source_message_ids=payload["message_ids"],
         )
-        if not summary_success:
-            logger.error(f"summary_id 更新失败，终止操作")
-            return {
-                "success": False,
-                "reason": "summary_id 更新失败",
-                "filtered_message_ids": filtered_message_ids,
-                "token_count": total_tokens,
-                "message_count": len(messages),
-            }
-
-        # 2. 更新用户画像
-        if new_user_profile:
-            profile_success = await pg_client.update_user_profile(
-                user_id, new_user_profile
-            )
-            if not profile_success:
-                logger.error(f"用户画像更新失败，回滚 summary_id")
-                await pg_client.update_messages_with_summary_id(
-                    update_message_ids, None
-                )
-                return {
-                    "success": False,
-                    "reason": "用户画像更新失败，已回滚",
-                    "filtered_message_ids": filtered_message_ids,
-                    "token_count": total_tokens,
-                    "message_count": len(messages),
-                }
-
-        # 3. 更新 Milvus
-        milvus_success = await milvus_client.add_memories_batch(
-            user_id=user_id,
-            thread_id=thread_id,
-            memory_dict=filtered_memory,
-            summary_id=summary_id,
+        if not ok:
+            raise RuntimeError("memory_vector_write_failed")
+        await ledger.acknowledge(
+            batch, uid, tenant, thread, payload["message_ids"],
+            payload["summary_id"], payload["profile"],
         )
-
-        if not milvus_success:
-            logger.error(f"Milvus插入失败，回滚PostgreSQL")
-            # 回滚 summary_id
-            await pg_client.update_messages_with_summary_id(update_message_ids, None)
-            # 回滚用户画像
-            if old_user_profile is not None:
-                await pg_client.update_user_profile(user_id, old_user_profile)
-            return {
-                "success": False,
-                "reason": "Milvus插入失败，已回滚PostgreSQL",
-                "filtered_message_ids": filtered_message_ids,
-                "token_count": total_tokens,
-                "message_count": len(messages),
-            }
-
-        # 全部成功
-        logger.info(f"成功压缩会话 {thread_id}，摘要 {summary_id}")
-        return {
-            "success": True,
-            "summary_id": summary_id,
-            "user_profile": new_user_profile,
-            "filtered_message_ids": filtered_message_ids,
-            "token_count": total_tokens,
-            "message_count": len(messages),
-            "updated_message_count": len(update_message_ids),
-        }
-
-    except Exception as e:
-        logger.error(f"存储记忆异常: {e}")
-
-        # 尝试回滚
+    except Exception as error:
+        await ledger.failed(batch, error)
+        raise
+    if payload["profile"]:
+        # The DB is authoritative. Cache invalidation failure does not undo a
+        # committed vector/source batch or re-run the old profile merge.
         try:
-            await pg_client.update_messages_with_summary_id(update_message_ids, None)
-            if old_user_profile is not None:
-                await pg_client.update_user_profile(user_id, old_user_profile)
-        except Exception as rollback_error:
-            logger.error(f"回滚失败: {rollback_error}")
-
-        return {
-            "success": False,
-            "reason": f"存储记忆失败: {str(e)}",
-            "filtered_message_ids": filtered_message_ids,
-            "token_count": total_tokens,
-            "message_count": len(messages),
-        }
+            from infra.redis_cache import get_redis_client
+            redis = await get_redis_client()
+            await redis.delete(f"user_profile:{uid}")
+        except Exception:
+            logger.warning("画像缓存失效失败，数据库已提交", exc_info=True)
+    return {
+        "success": True, "batch_id": batch, "summary_id": payload["summary_id"],
+        "token_count": payload["token_count"], "message_count": payload["message_count"],
+        "updated_message_count": len(payload["message_ids"]),
+    }
 
 
 async def process_all_users_conversations(
@@ -406,25 +383,26 @@ async def process_all_users_conversations(
         async with pg_client.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT DISTINCT user_id, thread_id
+                SELECT DISTINCT user_id, tenant_id, thread_id
                 FROM raw_conversations
-                WHERE summary_id IS NULL
-                ORDER BY user_id, thread_id
+                WHERE summary_id IS NULL OR summary_id = ''
+                ORDER BY tenant_id, user_id, thread_id
             """
             )
 
         # 处理每个会话，捕获单个会话的异常
         for row in rows:
             user_id = row["user_id"]
+            tenant_id = row["tenant_id"] or "default"
             thread_id = row["thread_id"]
 
             try:
                 # 获取未摘要的会话消息
-                messages = await get_unsunmarized_conversations(user_id, thread_id)
+                messages = await get_unsunmarized_conversations(user_id, thread_id, tenant_id)
                 if messages:
                     # 压缩会话消息
                     result = await extract_and_append_memory(
-                        messages, model, user_id, thread_id
+                        messages, model, user_id, thread_id, tenant_id
                     )
                     results["total_conversations_processed"] += 1
 
@@ -436,7 +414,7 @@ async def process_all_users_conversations(
                         results["failed_count"] += 1
 
                     results["details"].append(
-                        {"user_id": user_id, "thread_id": thread_id, **result}
+                        {"user_id": user_id, "tenant_id": tenant_id, "thread_id": thread_id, **result}
                     )
             except Exception as e:
                 # 单个会话处理失败，记录错误但继续处理其他会话
@@ -448,6 +426,7 @@ async def process_all_users_conversations(
                 results["details"].append(
                     {
                         "user_id": user_id,
+                        "tenant_id": tenant_id,
                         "thread_id": thread_id,
                         "success": False,
                         "reason": f"处理异常: {str(e)}",

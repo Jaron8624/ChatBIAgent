@@ -1,0 +1,17 @@
+{
+  "dimensions": {},
+  "metrics": {
+    "shipping_fee_total": {
+      "display_name": "运费总额",
+      "description": "订单明细中的运费合计",
+      "dataset": "olist",
+      "table": "olist_order_items_dataset",
+      "aggregation": "SUM",
+      "measure_column": "olist_order_items_dataset.freight_value",
+      "dimensions": ["customer_state"],
+      "from_clause": "olist_orders_dataset JOIN olist_order_items_dataset USING(order_id) JOIN olist_customers_dataset USING(customer_id)",
+      "round_decimal": 2,
+      "aliases": ["运费总额", "shipping fee total"]
+    }
+  }
+}

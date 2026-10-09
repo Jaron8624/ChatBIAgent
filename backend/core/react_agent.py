@@ -138,7 +138,10 @@ class ReActAgent:
                     break
                 return {
                     "answer": "抱歉，处理您的问题时出现内部错误，请稍后再试。",
-                    "iterations": i, "tool_calls": tool_calls_log, "trace": trace,
+                    "iterations": i,
+                    "tool_calls": tool_calls_log,
+                    "trace": trace,
+                    "termination_reason": "parse_error",
                 }
 
             thought = decision.get("thought", "")
@@ -152,6 +155,7 @@ class ReActAgent:
                     "iterations": i,
                     "tool_calls": tool_calls_log,
                     "trace": trace,
+                    "termination_reason": "final",
                 }
 
             # 工具调用分支
@@ -201,4 +205,5 @@ class ReActAgent:
             "tool_calls": tool_calls_log,
             "trace": trace,
             "forced_final": True,
+            "termination_reason": "max_iterations",
         }

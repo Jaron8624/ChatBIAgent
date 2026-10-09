@@ -18,6 +18,9 @@
 
 import time
 import uuid
+import json
+import os
+import urllib.request
 from typing import Dict, Any, List, Optional
 
 
@@ -63,6 +66,24 @@ class Span:
             "tags": self.tags,
             "status": self.status,
             "error": self.error,
+        }
+
+    def to_otel(self) -> Dict[str, Any]:
+        start_ns = self.start_time_ms * 1_000_000
+        end_ns = (self.end_time_ms or self.start_time_ms + self.duration_ms) * 1_000_000
+        return {
+            "traceId": self.trace_id,
+            "spanId": self.span_id,
+            "parentSpanId": self.parent_id or "",
+            "name": self.name,
+            "kind": 1,
+            "startTimeUnixNano": str(start_ns),
+            "endTimeUnixNano": str(end_ns),
+            "attributes": [
+                {"key": str(key), "value": {"stringValue": str(value)}}
+                for key, value in self.tags.items()
+            ],
+            "status": {"code": 1 if self.status == "ok" else 2, "message": self.error or ""},
         }
 
 
@@ -113,6 +134,36 @@ class Tracer:
     def get_all_spans(self) -> List[Dict[str, Any]]:
         return [s.to_dict() for s in self._spans]
 
+    def to_otel(self, trace_id: Optional[str] = None) -> Dict[str, Any]:
+        selected = [span for span in self._spans if trace_id is None or span.trace_id == trace_id]
+        return {
+            "resourceSpans": [{
+                "resource": {"attributes": [{
+                    "key": "service.name",
+                    "value": {"stringValue": os.getenv("OTEL_SERVICE_NAME", "nexusmind-agent")},
+                }]},
+                "scopeSpans": [{"scope": {"name": "nexusmind.tracing"}, "spans": [span.to_otel() for span in selected]}],
+            }]
+        }
+
     @staticmethod
     def _gen_id() -> str:
         return str(uuid.uuid4()).replace("-", "")[:16]
+
+
+def export_otel_trace(payload: Dict[str, Any], endpoint: Optional[str] = None, timeout: float = 2.0) -> bool:
+    """Send an OTLP/HTTP JSON payload when an exporter endpoint is configured."""
+    target = (endpoint or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")).strip()
+    if not target:
+        return False
+    request = urllib.request.Request(
+        target,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= int(response.status) < 300
+    except Exception:
+        return False

@@ -87,11 +87,15 @@ def get_embeddings():
     else:
         # OpenAI 兼容协议（SiliconFlow / Ollama / 其他）
         from langchain_openai import OpenAIEmbeddings
+        batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "10"))
+        if batch_size < 1:
+            raise ValueError("EMBEDDING_BATCH_SIZE必须是正整数")
         embeddings = OpenAIEmbeddings(
             model=model,
             api_key=api_key or "ollama",  # Ollama 等免鉴权服务给占位符
             base_url=base_url,
             check_embedding_ctx_length=False,  # 兼容不支持 token 计数的 OpenAI 兼容服务
+            chunk_size=batch_size,
         )
 
     logger.info(

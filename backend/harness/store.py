@@ -231,6 +231,24 @@ human_annotations = Table(
     Column("created_at", String(64), nullable=False),
 )
 
+observability_events = Table(
+    "harness_observability_events",
+    metadata,
+    Column("event_id", String(96), primary_key=True),
+    Column("trace_id", String(160), nullable=False, index=True),
+    Column("tenant_id", String(160), nullable=False, default=""),
+    Column("candidate_id", String(96), index=True),
+    Column("release_mode", String(32), nullable=False, default="baseline"),
+    Column("status", String(32), nullable=False, default="ok"),
+    Column("latency_ms", Float, nullable=False, default=0.0),
+    Column("tokens", Integer, nullable=False, default=0),
+    Column("cost", Float, nullable=False, default=0.0),
+    Column("quality", Float),
+    Column("safety_passed", Boolean),
+    Column("payload_json", JSON, nullable=False, default=dict),
+    Column("created_at", String(64), nullable=False),
+)
+
 
 ALLOWED_CANDIDATE_TRANSITIONS = {
     CandidateStatus.DRAFT.value: {CandidateStatus.CANDIDATE.value},
@@ -250,6 +268,7 @@ ALLOWED_CANDIDATE_TRANSITIONS = {
         CandidateStatus.EVALUATING.value,
         CandidateStatus.ACTIVE.value,
         CandidateStatus.REJECTED.value,
+        CandidateStatus.ROLLED_BACK.value,
     },
     CandidateStatus.REJECTED.value: {
         CandidateStatus.CANDIDATE.value,
@@ -334,7 +353,12 @@ class HarnessStore:
                     "case_id": case.case_id,
                     "input_json": case.input,
                     "expected_json": case.expected,
-                    "metadata_json": case.metadata,
+                    "metadata_json": {
+                        **case.metadata,
+                        "_harness_protected_class": case.resolved_protected_class(),
+                        "_harness_suite": case.resolved_suite(),
+                        "_harness_seed": case.seed,
+                    },
                     "tags_json": case.tags,
                     "protected": case.protected,
                     "repetitions": max(1, case.repetitions),
@@ -354,15 +378,22 @@ class HarnessStore:
                 select(dataset_cases).where(dataset_cases.c.dataset_version_id == dataset_version_id)
                 .order_by(dataset_cases.c.case_id)
             ).mappings().all()
-        return [EvalCase(
-            case_id=row["case_id"],
-            input=dict(row["input_json"] or {}),
-            expected=dict(row["expected_json"] or {}),
-            metadata=dict(row["metadata_json"] or {}),
-            tags=list(row["tags_json"] or []),
-            protected=bool(row["protected"]),
-            repetitions=int(row["repetitions"] or 1),
-        ) for row in rows]
+        cases = []
+        for row in rows:
+            raw_metadata = dict(row["metadata_json"] or {})
+            cases.append(EvalCase(
+                case_id=row["case_id"],
+                input=dict(row["input_json"] or {}),
+                expected=dict(row["expected_json"] or {}),
+                metadata=raw_metadata,
+                tags=list(row["tags_json"] or []),
+                protected=bool(row["protected"]),
+                repetitions=int(row["repetitions"] or 1),
+                protected_class=str(raw_metadata.get("_harness_protected_class", "")),
+                suite=str(raw_metadata.get("_harness_suite", "regression")),
+                seed=raw_metadata.get("_harness_seed"),
+            ))
+        return cases
 
     def list_datasets(self) -> List[Dict[str, Any]]:
         stmt = (
@@ -527,13 +558,18 @@ class HarnessStore:
         score_list: Iterable[Score],
     ) -> str:
         case_result_id = new_id("result")
+        output_payload = dict(result.get("output", {}) or {})
+        if result.get("tool_events") is not None:
+            output_payload.setdefault("tool_events", result.get("tool_events") or [])
+        if result.get("usage") is not None:
+            output_payload.setdefault("usage", result.get("usage") or {})
         with self.engine.begin() as conn:
             conn.execute(insert(case_results).values(
                 case_result_id=case_result_id,
                 run_id=run_id,
                 case_id=case_id,
                 repetition=repetition,
-                output_json=result.get("output", {}),
+                output_json=output_payload,
                 trace_json=result.get("trace", {}),
                 status=result.get("status", "success"),
                 latency_ms=float(result.get("latency_ms", 0.0)),
@@ -561,6 +597,22 @@ class HarnessStore:
             if score_rows:
                 conn.execute(insert(scores), score_rows)
         return case_result_id
+
+    def get_case_result(self, case_result_id: str) -> Optional[Dict[str, Any]]:
+        """Load one immutable sample for exact Harness replay."""
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                select(case_results).where(case_results.c.case_result_id == case_result_id)
+            ).mappings().first()
+            if not result:
+                return None
+            score_rows = conn.execute(
+                select(scores).where(scores.c.case_result_id == case_result_id)
+                .order_by(scores.c.name)
+            ).mappings().all()
+        payload = dict(result)
+        payload["scores"] = [dict(row) for row in score_rows]
+        return payload
 
     def save_gate_decision(self, decision: GateDecision) -> None:
         with self.engine.begin() as conn:
@@ -647,6 +699,109 @@ class HarnessStore:
                 conn.execute(update(bad_cases).where(
                     bad_cases.c.bad_case_id == bad_case_id
                 ).values(**values))
+
+    def get_bad_case(self, bad_case_id: str) -> Optional[Dict[str, Any]]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(bad_cases).where(bad_cases.c.bad_case_id == bad_case_id)
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def review_bad_case(
+        self,
+        bad_case_id: str,
+        decision: str,
+        actor: str,
+        comment: str = "",
+    ) -> Dict[str, Any]:
+        """审核线上样本，只有 approved 才能进入新的数据集版本。"""
+        normalized = str(decision or "").strip().lower()
+        status = {"approve": "approved", "approved": "approved", "reject": "rejected", "rejected": "rejected"}.get(normalized)
+        if not status:
+            raise ValueError("decision must be approve or reject")
+        case = self.get_bad_case(bad_case_id)
+        if not case:
+            raise KeyError(f"bad case not found: {bad_case_id}")
+        self.update_bad_case_status(bad_case_id, status)
+        payload = {
+            "bad_case_id": bad_case_id,
+            "decision": status,
+            "comment": comment,
+        }
+        self.audit("bad_case", bad_case_id, "reviewed", actor, payload)
+        return {**case, "processing_status": status, "review_comment": comment}
+
+    def add_observability_event(self, payload: Dict[str, Any]) -> str:
+        """将脱敏后的线上观测统一写入 Harness 存储。"""
+        event_id = str(payload.get("event_id") or new_id("obs"))
+        now = str(payload.get("created_at") or utc_now())
+        values = {
+            "event_id": event_id,
+            "trace_id": str(payload.get("trace_id") or event_id),
+            "tenant_id": str(payload.get("tenant_id") or ""),
+            "candidate_id": payload.get("candidate_id"),
+            "release_mode": str(payload.get("release_mode") or "baseline"),
+            "status": str(payload.get("status") or "ok"),
+            "latency_ms": float(payload.get("latency_ms") or 0.0),
+            "tokens": int(payload.get("tokens") or 0),
+            "cost": float(payload.get("cost") or 0.0),
+            "quality": float(payload["quality"]) if payload.get("quality") is not None else None,
+            "safety_passed": bool(payload["safety_passed"]) if payload.get("safety_passed") is not None else None,
+            "payload_json": dict(payload.get("payload") or {}),
+            "created_at": now,
+        }
+        with self.engine.begin() as conn:
+            conn.execute(insert(observability_events).values(**values))
+        return event_id
+
+    def list_observability_events(
+        self,
+        limit: int = 100,
+        candidate_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        stmt = select(observability_events).order_by(observability_events.c.created_at.desc()).limit(limit)
+        if candidate_id:
+            stmt = stmt.where(observability_events.c.candidate_id == candidate_id)
+        if tenant_id:
+            stmt = stmt.where(observability_events.c.tenant_id == tenant_id)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def observability_summary(
+        self,
+        candidate_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        rows = self.list_observability_events(limit=min(max(1, limit), 5000), candidate_id=candidate_id, tenant_id=tenant_id)
+        if not rows:
+            return {
+                "sample_count": 0,
+                "success_rate": None,
+                "safety_pass_rate": None,
+                "avg_latency_ms": None,
+                "p95_latency_ms": None,
+                "avg_tokens": None,
+                "avg_cost": None,
+            }
+        latencies = sorted(float(row.get("latency_ms") or 0.0) for row in rows)
+        success = sum(1 for row in rows if row.get("status") == "ok")
+        safety_rows = [row for row in rows if row.get("safety_passed") is not None]
+        tokens = [int(row.get("tokens") or 0) for row in rows]
+        costs = [float(row.get("cost") or 0.0) for row in rows]
+        p95_index = min(len(latencies) - 1, max(0, int((len(latencies) - 1) * 0.95)))
+        return {
+            "sample_count": len(rows),
+            "success_rate": round(success / len(rows), 6),
+            "safety_pass_rate": round(
+                sum(1 for row in safety_rows if row.get("safety_passed")) / len(safety_rows), 6
+            ) if safety_rows else None,
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 3),
+            "p95_latency_ms": round(latencies[p95_index], 3),
+            "avg_tokens": round(sum(tokens) / len(tokens), 3),
+            "avg_cost": round(sum(costs) / len(costs), 8),
+        }
 
     def get_latest_gate(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         stmt = (

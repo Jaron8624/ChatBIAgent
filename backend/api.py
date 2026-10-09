@@ -20,7 +20,6 @@ import aiofiles
 import os
 import json
 from fastapi.responses import StreamingResponse
-from core.agent import stream_agent_response
 from infra.schemas import (
     DocumentUploadResponse,
     DocumentDeleteResponse,
@@ -40,13 +39,14 @@ from evaluation.monitor import Monitor
 from infra.access_control import (
     get_access_controller,
     require_permission,
-    UserRole,
     Permission,
 )
 from infra.skills_manager import SkillsManager, init_default_skills
 from evaluation.self_evolution import SelfEvolutionEngine
 from memory.session_recovery import get_session_manager
 from tools.mcp_protocol import MCPServerPool, create_mcp_pool_from_env
+from harness.runtime import get_harness_runtime
+from infra.llm_usage import UsageTracker
 
 # 配置日志
 logging.basicConfig(
@@ -61,6 +61,29 @@ router = APIRouter()
 # 配置常量
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200mb
 CHUNK_SIZE = 1024 * 1024  # 1mb
+MAX_CLIENT_HISTORY_MESSAGES = 40
+MAX_CLIENT_MESSAGE_CHARS = 12000
+
+
+def _sanitize_client_messages(messages: object) -> List[Dict[str, str]]:
+    """Accept plain user/assistant history only; never trust client system/tool roles."""
+    if messages is None:
+        return []
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="messages 必须是数组")
+
+    safe_messages = []
+    for item in messages[-MAX_CLIENT_HISTORY_MESSAGES:]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        safe_messages.append({
+            "role": item["role"],
+            "content": content[:MAX_CLIENT_MESSAGE_CHARS],
+        })
+    return safe_messages
 MAX_CONCURRENT_UPLOADS = 10
 
 # 全局实例
@@ -114,8 +137,10 @@ async def file_upload(
     knowledge_base_id: str = File(...),
     user_id: int = File(...),  # 新增 user_id 参数
     background_tasks: BackgroundTasks = None,
+    user_info: dict = Depends(require_permission(Permission.UPLOAD_DOCUMENT)),
 ):
     """上传文档并进行embedding,支持文件去重"""
+    user_id = user_info["user_id"]
 
     # 初始化变量，避免作用域问题
     temp_file_path = None
@@ -268,8 +293,10 @@ async def create_knowledge_base(
     knowledge_base_id: str,
     user_id: int,
     postgresql_client=Depends(get_postgresql_client),
+    user_info: dict = Depends(require_permission(Permission.CREATE_KB)),
 ):
     """创建知识库"""
+    user_id = user_info["user_id"]
     result = await postgresql_client.create_knowledge_base(knowledge_base_id, user_id)
 
     if not result["success"]:
@@ -297,8 +324,10 @@ async def delete_knowledge_base(
     user_id: int,
     postgresql_client=Depends(get_postgresql_client),
     milvus_client=Depends(get_milvus_client),
+    user_info: dict = Depends(require_permission(Permission.DELETE_KB)),
 ):
     """删除知识库（先删 PostgreSQL，成功后再删 Milvus）"""
+    user_id = user_info["user_id"]
     try:
         # 1. 删除 PostgreSQL 中的知识库
         pg_result = await postgresql_client.delete_knowledge_base(
@@ -355,8 +384,10 @@ async def delete_knowledge_base(
 async def get_user_knowledge_bases(
     user_id: int,
     postgresql_client=Depends(get_postgresql_client),
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
 ):
     """获取用户的所有知识库"""
+    user_id = user_info["user_id"]
     result = await postgresql_client.get_user_knowledge_bases(user_id)
     print("查询用户知识库结果:", result)
 
@@ -381,8 +412,10 @@ async def get_knowledge_base_files(
     knowledge_base_id: str,
     user_id: int,
     postgresql_client=Depends(get_postgresql_client),
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
 ):
     """获取知识库中的所有文件"""
+    user_id = user_info["user_id"]
     result = await postgresql_client.get_knowledge_base_files(
         knowledge_base_id, user_id
     )
@@ -417,8 +450,10 @@ async def delete_file(
     user_id: int,
     postgresql_client=Depends(get_postgresql_client),
     milvus_client=Depends(get_milvus_client),
+    user_info: dict = Depends(require_permission(Permission.DELETE_DOCUMENT)),
 ):
     """删除文件-通过文件哈希删除（先删 PostgreSQL，成功后再删 Milvus）"""
+    user_id = user_info["user_id"]
     deleted_parent_count = 0
     deleted_child_count = 0
 
@@ -474,33 +509,13 @@ async def delete_file(
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
-# ==================== 原有流式对话接口（保留兼容）====================
-
-@router.get("/chat_with_agent/stream")
-async def chat_with_agent(
-    query: str,
-    knowledge_base_id: str,
-    user_id: int,
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    流式返回 agent 响应（保留原有单 Agent 模式，兼容旧前端）
-    """
-    return StreamingResponse(
-        stream_agent_response(
-            user_message=query,
-            knowledge_base_id=knowledge_base_id,
-            user_id=user_id,
-            background_tasks=background_tasks,
-        ),
-        media_type="text/plain; charset=utf-8",
-    )
-
-
 # ==================== 新增：多 Agent 编排对话接口 ====================
 
 @router.post("/chat/orchestrate")
-async def chat_orchestrate(request: Request):
+async def chat_orchestrate(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """
     多 Agent 编排对话接口
     请求体：{"query": "...", "user_id": 1, "session_id": "...", "knowledge_base_id": "...", "messages": [...]}
@@ -510,11 +525,15 @@ async def chat_orchestrate(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
 
-    query = body.get("query", "").strip()
-    user_id = body.get("user_id", 0)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+
+    query = str(body.get("query", "")).strip()
+    user_id = user_info["user_id"]
+    tenant_id = user_info["tenant_id"]
     session_id = body.get("session_id", f"{user_id}")
     knowledge_base_id = body.get("knowledge_base_id", "默认知识库")
-    messages = body.get("messages", [])
+    messages = _sanitize_client_messages(body.get("messages", []))
 
     if not query:
         raise HTTPException(status_code=400, detail="query 不能为空")
@@ -524,14 +543,29 @@ async def chat_orchestrate(request: Request):
 
     start = asyncio.get_event_loop().time()
     try:
-        result = await orchestrator.process(
-            query=query,
-            user_id=user_id,
-            session_id=session_id,
-            knowledge_base_id=knowledge_base_id,
-            messages=messages,
-        )
+        runtime = get_harness_runtime()
+        with runtime.request_scope(tenant_id, user_id) as release:
+            with UsageTracker() as tracker:
+                result = await orchestrator.process(
+                    query=query,
+                    user_id=user_id,
+                    session_id=session_id,
+                    knowledge_base_id=knowledge_base_id,
+                    messages=messages,
+                    tenant_id=tenant_id,
+                )
+            usage = tracker.snapshot()
+            if usage["calls"] == 0 and result.get("usage_available"):
+                usage.update({"complete": True, "usage_complete": True, "cost_complete": True})
+            result.update({
+                "usage": usage,
+                "usage_available": bool(usage.get("complete")),
+                "tokens_consumed": int(usage.get("total_tokens", 0) or 0),
+                "estimated_cost": float(usage.get("estimated_cost", 0.0) or 0.0),
+                "model_call_count": int(usage.get("calls", 0) or 0),
+            })
         latency = (asyncio.get_event_loop().time() - start) * 1000
+        release_observation = runtime.observe(release, result, latency)
 
         return {
             "success": True,
@@ -549,15 +583,26 @@ async def chat_orchestrate(request: Request):
             "react_result": result.get("react_result"),
             "latency_ms": round(latency, 2),
             "model_used": result.get("model_used", ""),
+            "session_id": result.get("session_id", session_id),
+            "tenant_id": tenant_id,
+            "release": release_observation.get("release", release.to_dict()),
         }
     except Exception as e:
+        from infra.graph_checkpointer import GraphCheckpointBusy
+        if isinstance(e, GraphCheckpointBusy):
+            raise HTTPException(status_code=409, detail=str(e))
+        if isinstance(e, PermissionError):
+            raise HTTPException(status_code=409, detail=str(e))
         logger.error(f"编排对话失败: {e}", exc_info=True)
         monitor.record("orchestrator", 0, False, tokens=0)
         raise HTTPException(status_code=500, detail=f"对话处理失败: {str(e)}")
 
 
 @router.post("/chat/orchestrate/stream")
-async def chat_orchestrate_stream(request: Request):
+async def chat_orchestrate_stream(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """
     多 Agent 编排流式对话接口（真流式）
     通过 SSE 实时推送每个节点的执行事件，无需等待全链路结束
@@ -567,11 +612,15 @@ async def chat_orchestrate_stream(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
 
-    query = body.get("query", "").strip()
-    user_id = body.get("user_id", 0)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+
+    query = str(body.get("query", "")).strip()
+    user_id = user_info["user_id"]
+    tenant_id = user_info["tenant_id"]
     session_id = body.get("session_id", f"{user_id}")
     knowledge_base_id = body.get("knowledge_base_id", "默认知识库")
-    messages = body.get("messages", [])
+    messages = _sanitize_client_messages(body.get("messages", []))
 
     if not query:
         raise HTTPException(status_code=400, detail="query 不能为空")
@@ -581,23 +630,53 @@ async def chat_orchestrate_stream(request: Request):
         queue = asyncio.Queue()
         final_result = {"final_response": ""}
         spans = []
+        runtime = get_harness_runtime()
+        release = None
 
         async def on_event(event_type, data):
             await queue.put((event_type, data))
 
         async def run_orchestrator():
+            nonlocal release
+            started = asyncio.get_event_loop().time()
             try:
-                result = await orchestrator.process(
-                    query=query,
-                    user_id=user_id,
-                    session_id=session_id,
-                    knowledge_base_id=knowledge_base_id,
-                    messages=messages,
-                    on_event=on_event,
+                with runtime.request_scope(tenant_id, user_id) as selected_release:
+                    release = selected_release
+                    with UsageTracker() as tracker:
+                        result = await orchestrator.process(
+                            query=query,
+                            user_id=user_id,
+                            session_id=session_id,
+                            knowledge_base_id=knowledge_base_id,
+                            messages=messages,
+                            on_event=on_event,
+                            tenant_id=tenant_id,
+                        )
+                    usage = tracker.snapshot()
+                    if usage["calls"] == 0 and result.get("usage_available"):
+                        usage.update({"complete": True, "usage_complete": True, "cost_complete": True})
+                    result.update({
+                        "usage": usage,
+                        "usage_available": bool(usage.get("complete")),
+                        "tokens_consumed": int(usage.get("total_tokens", 0) or 0),
+                        "estimated_cost": float(usage.get("estimated_cost", 0.0) or 0.0),
+                        "model_call_count": int(usage.get("calls", 0) or 0),
+                    })
+                runtime.observe(
+                    release,
+                    result,
+                    (asyncio.get_event_loop().time() - started) * 1000,
                 )
+                result["release"] = release.to_dict() if release else {}
                 final_result.update(result)
             except Exception as e:
                 logger.error(f"编排流式对话失败: {e}", exc_info=True)
+                if release is not None:
+                    runtime.observe(
+                        release,
+                        {"error_info": str(e), "trace_id": ""},
+                        (asyncio.get_event_loop().time() - started) * 1000,
+                    )
                 await queue.put(("error", {"content": str(e)}))
             finally:
                 await queue.put(("__done__", {}))
@@ -615,6 +694,9 @@ async def chat_orchestrate_stream(request: Request):
 
                 if event_type == "intent":
                     yield f"data: {json.dumps({'type': 'intent', 'intent': data.get('intent', ''), 'confidence': data.get('confidence', 0.0)}, ensure_ascii=False)}\n\n"
+
+                elif event_type == "session":
+                    yield f"data: {json.dumps({'type': 'session', 'session_id': data.get('session_id', '')}, ensure_ascii=False)}\n\n"
 
                 elif event_type == "node_start":
                     yield f"data: {json.dumps({'type': 'node_start', 'node': data.get('node', '')}, ensure_ascii=False)}\n\n"
@@ -668,7 +750,7 @@ async def chat_orchestrate_stream(request: Request):
                 yield f"data: {json.dumps({'type': 'trace', 'spans': final_result['spans']}, ensure_ascii=False)}\n\n"
 
             # 发送最终结束标记
-            yield f"data: {json.dumps({'type': 'finished', 'latency_ms': final_result.get('latency_ms', 0), 'model_used': final_result.get('model_used', '')}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'finished', 'latency_ms': final_result.get('latency_ms', 0), 'model_used': final_result.get('model_used', ''), 'session_id': final_result.get('session_id', session_id), 'release': final_result.get('release', {})}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             logger.error(f"SSE 流异常: {e}", exc_info=True)
@@ -686,7 +768,9 @@ async def chat_orchestrate_stream(request: Request):
 # ==================== 新增：Monitor 监控接口 ====================
 
 @router.get("/monitor/metrics")
-async def get_monitor_metrics():
+async def get_monitor_metrics(
+    user_info: dict = Depends(require_permission(Permission.VIEW_METRICS)),
+):
     """获取 Monitor 聚合指标"""
     monitor = get_monitor()
     return {
@@ -697,7 +781,10 @@ async def get_monitor_metrics():
 
 
 @router.post("/monitor/feedback")
-async def post_user_feedback(request: Request):
+async def post_user_feedback(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """用户满意度反馈（点赞/点踩）"""
     try:
         body = await request.json()
@@ -719,10 +806,12 @@ async def post_user_feedback(request: Request):
     if not satisfied:
         try:
             from chatbi.observability import TraceStore
-            TraceStore().record_online_bad_case({
+            trace_store = TraceStore()
+            bad_case = trace_store.record_online_bad_case({
                 "trace_id": trace_id, "session_id": session_id,
                 "query": query, "response": response,
             }, reason="user_thumbs_down", feedback=False)
+            await trace_store.persist_harness_records(bad_case=bad_case)
         except Exception as exc:
             logger.warning(f"点踩 Bad Case 落盘失败: {exc}")
 
@@ -736,7 +825,10 @@ async def post_user_feedback(request: Request):
 # ==================== 新增：Evaluation 评测接口 ====================
 
 @router.post("/evaluation/evaluate")
-async def evaluate_single(request: Request):
+async def evaluate_single(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
     """单条 LLM-as-Judge 评测"""
     try:
         body = await request.json()
@@ -769,7 +861,10 @@ async def evaluate_single(request: Request):
 
 
 @router.post("/evaluation/batch")
-async def evaluate_batch(request: Request):
+async def evaluate_batch(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
     """批量评测（基准测试集）"""
     try:
         body = await request.json()
@@ -806,7 +901,10 @@ async def evaluate_batch(request: Request):
 
 
 @router.get("/evaluation/bad-cases")
-async def get_bad_cases(limit: int = 50):
+async def get_bad_cases(
+    limit: int = 50,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
     """获取 Bad Case 库"""
     evaluator = get_evaluator()
     cases = evaluator.get_bad_cases(limit)
@@ -827,7 +925,9 @@ async def get_bad_cases(limit: int = 50):
 
 
 @router.get("/evaluation/summary")
-async def get_evaluation_summary():
+async def get_evaluation_summary(
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
     """获取评测汇总"""
     evaluator = get_evaluator()
     return {
@@ -857,7 +957,9 @@ async def run_golden_evaluation(
 # ==================== 新增：MCP 工具接口 ====================
 
 @router.get("/mcp/tools")
-async def list_mcp_tools():
+async def list_mcp_tools(
+    user_info: dict = Depends(require_permission(Permission.USE_MCP_TOOLS)),
+):
     """列出 MCP 工具"""
     orchestrator = get_orchestrator()
     tools = orchestrator.mcp_server.list_tools()
@@ -868,7 +970,10 @@ async def list_mcp_tools():
 
 
 @router.post("/mcp/tools/call")
-async def call_mcp_tool(request: Request):
+async def call_mcp_tool(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.USE_MCP_TOOLS)),
+):
     """调用 MCP 工具"""
     try:
         body = await request.json()
@@ -896,7 +1001,10 @@ async def call_mcp_tool(request: Request):
 # ==================== 新增：意图识别接口 ====================
 
 @router.post("/intent/recognize")
-async def recognize_intent(request: Request):
+async def recognize_intent(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """端到端意图识别（三路融合+加权投票）"""
     try:
         body = await request.json()
@@ -911,7 +1019,10 @@ async def recognize_intent(request: Request):
 
     orchestrator = get_orchestrator()
     intent, confidence, clarify = await orchestrator.intent_recognizer.recognize(
-        query, session_id
+        query,
+        session_id,
+        tenant_id=user_info.get("tenant_id", "default"),
+        user_id=user_info.get("user_id", 0),
     )
 
     return {
@@ -927,12 +1038,10 @@ async def recognize_intent(request: Request):
 
 @router.get("/acl/permissions")
 async def get_permissions(
-    request: Request,
     user_info: dict = Depends(require_permission(Permission.ADMIN_PANEL))
 ):
     """获取当前角色的权限列表"""
-    role_header = request.headers.get("X-User-Role", "guest")
-    role = UserRole(role_header.lower())
+    role = user_info["role"]
     acl = get_access_controller()
     return {
         "success": True,
@@ -966,7 +1075,10 @@ async def get_dangerous_logs(
 
 
 @router.post("/acl/confirm-dangerous")
-async def confirm_dangerous_operation(request: Request):
+async def confirm_dangerous_operation(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.EXECUTE_DANGEROUS)),
+):
     """确认危险操作"""
     try:
         body = await request.json()
@@ -974,7 +1086,7 @@ async def confirm_dangerous_operation(request: Request):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
 
     token = body.get("token", "")
-    user_id = int(request.headers.get("X-User-Id", "0"))
+    user_id = user_info["user_id"]
     acl = get_access_controller()
     confirmed = acl.confirm_dangerous_operation(token, user_id)
     return {
@@ -1008,7 +1120,10 @@ async def list_skills(
 
 
 @router.post("/skills")
-async def create_skill(request: Request):
+async def create_skill(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS)),
+):
     """创建新 Skill"""
     try:
         body = await request.json()
@@ -1068,7 +1183,10 @@ async def get_evolution_rules(
 
 
 @router.post("/evolution/review")
-async def review_evolution_rule(request: Request):
+async def review_evolution_rule(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS)),
+):
     """Approve a rule for Harness evaluation, merge evaluation, or discard it."""
     try:
         body = await request.json()
@@ -1143,6 +1261,82 @@ async def list_harness_datasets(
     }
 
 
+@router.get("/harness/bad-cases")
+async def list_harness_bad_cases(
+    status: Optional[str] = None,
+    limit: int = 100,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
+    from harness.service import get_harness_service
+    statuses = [status] if status else None
+    return {
+        "success": True,
+        "bad_cases": get_harness_service().store.list_bad_cases(
+            limit=min(limit, 500), statuses=statuses
+        ),
+    }
+
+
+@router.post("/harness/bad-cases/{bad_case_id}/review")
+async def review_harness_bad_case(
+    bad_case_id: str,
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS)),
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "reviewer")
+    from harness.service import get_harness_service
+    try:
+        reviewed = get_harness_service().store.review_bad_case(
+            bad_case_id=bad_case_id,
+            decision=str(body.get("decision", "")),
+            actor=actor,
+            comment=str(body.get("comment", "")),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "bad_case": reviewed}
+
+
+@router.post("/harness/datasets/from-bad-cases")
+async def promote_bad_cases_to_harness_dataset(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS)),
+):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    name = str(body.get("name", "")).strip()
+    bad_case_ids = [str(item) for item in (body.get("bad_case_ids") or [])]
+    if not name or not bad_case_ids:
+        raise HTTPException(status_code=400, detail="name 和 bad_case_ids 必填")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "reviewer")
+    from harness.service import get_harness_service
+    try:
+        result = get_harness_service().promote_bad_cases_to_dataset(
+            name=name,
+            bad_case_ids=bad_case_ids,
+            case_overrides=dict(body.get("case_overrides") or {}),
+            description=str(body.get("description", "Reviewed production Bad Cases")),
+            version=str(body.get("version")) if body.get("version") else None,
+            actor=actor,
+            allow_unreviewed=bool(body.get("allow_unreviewed", False)),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, **result}
+
+
 @router.get("/harness/candidates")
 async def list_harness_candidates(
     status: Optional[str] = None,
@@ -1192,6 +1386,38 @@ async def list_harness_audit(
     }
 
 
+@router.get("/harness/observability")
+async def list_harness_observability(
+    candidate_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    limit: int = 100,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "events": get_harness_service().store.list_observability_events(
+            limit=min(limit, 500), candidate_id=candidate_id, tenant_id=tenant_id
+        ),
+    }
+
+
+@router.get("/harness/observability/summary")
+async def get_harness_observability_summary(
+    candidate_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    limit: int = 1000,
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION)),
+):
+    from harness.service import get_harness_service
+    return {
+        "success": True,
+        "summary": get_harness_service().store.observability_summary(
+            candidate_id=candidate_id, tenant_id=tenant_id, limit=min(limit, 5000)
+        ),
+    }
+
+
 @router.get("/harness/annotations")
 async def list_harness_annotations(
     subject_id: Optional[str] = None,
@@ -1223,7 +1449,8 @@ async def add_harness_annotation(
     if not subject_id:
         raise HTTPException(status_code=400, detail="subject_id 不能为空")
     score = body.get("score")
-    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
     try:
         annotation_id = get_harness_service().store.add_human_annotation(
@@ -1276,8 +1503,13 @@ async def evaluate_evolution_candidate(
             judge=get_evaluator().judge,
             dataset_version_id=dataset_version_id,
         )
-        gate = result["gate"]
-        rule.status = "evaluated" if gate["passed"] else "rejected"
+        gate = result.get("gate")
+        if gate:
+            rule.status = "evaluated" if gate["passed"] else "rejected"
+        else:
+            # The runner failed before case execution.  Keep the rule in the
+            # candidate area and expose the redacted preflight report.
+            rule.status = "candidate"
         engine._save_rules()
         return {"success": True, **result}
     except Exception as exc:
@@ -1311,6 +1543,116 @@ async def get_evolution_shadow(
     }
 
 
+@router.post("/evolution/approve")
+async def approve_evolution_release(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    """Record the release approval separately from the offline Gate."""
+    body = await request.json()
+    rule = get_evolution_engine()._rules.get(str(body.get("rule_id", "")))
+    if not rule or not rule.harness_candidate_id:
+        raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
+    from harness.service import get_harness_service
+    try:
+        result = get_harness_service().approve_candidate(
+            rule.harness_candidate_id,
+            actor,
+            str(body.get("gate_decision_id", "")),
+            str(body.get("comment", "")),
+        )
+        return {"success": True, "approval": result}
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/evolution/shadow/start")
+async def start_evolution_shadow(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    body = await request.json()
+    rule = get_evolution_engine()._rules.get(str(body.get("rule_id", "")))
+    if not rule or not rule.harness_candidate_id:
+        raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
+    from harness.service import get_harness_service
+    try:
+        result = get_harness_service().start_shadow_release(
+            rule.harness_candidate_id, actor, str(body.get("gate_decision_id", "")), int(body.get("observation_seconds", 300))
+        )
+        return {"success": True, "shadow": result}
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/evolution/canary/start")
+async def start_evolution_canary(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    body = await request.json()
+    rule = get_evolution_engine()._rules.get(str(body.get("rule_id", "")))
+    if not rule or not rule.harness_candidate_id:
+        raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
+    from harness.service import get_harness_service
+    try:
+        result = get_harness_service().start_canary_release(
+            rule.harness_candidate_id,
+            actor,
+            str(body.get("gate_decision_id", "")),
+            float(body.get("traffic_percent", 5.0)),
+            body.get("tenant_ids") or [],
+            int(body.get("observation_seconds", 300)),
+        )
+        return {"success": True, "canary": result}
+    except (KeyError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/evolution/canary/route")
+async def route_evolution_canary(
+    rule_id: str,
+    tenant_id: str,
+    user_id: str = "",
+    user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
+):
+    rule = get_evolution_engine()._rules.get(rule_id)
+    if not rule or not rule.harness_candidate_id:
+        raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
+    from harness.service import get_harness_service
+    return {"success": True, "route": get_harness_service().release_controller.route_for_canary(rule.harness_candidate_id, tenant_id, user_id)}
+
+
+@router.post("/evolution/canary/observe")
+async def observe_evolution_canary(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.MANAGE_SKILLS))
+):
+    body = await request.json()
+    rule = get_evolution_engine()._rules.get(str(body.get("rule_id", "")))
+    if not rule or not rule.harness_candidate_id:
+        raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
+    from harness.service import get_harness_service
+    result = get_harness_service().release_controller.record_observation(
+        rule.harness_candidate_id,
+        actor,
+        str(body.get("sample_id", "")),
+        float(body.get("quality", 0.0)),
+        bool(body.get("safety_passed", False)),
+        float(body.get("latency_ms", 0.0)),
+        body.get("metadata") or {},
+    )
+    return {"success": True, "observation": result}
+
+
 @router.post("/evolution/promote")
 async def promote_evolution_rule(
     request: Request,
@@ -1321,7 +1663,8 @@ async def promote_evolution_rule(
     except Exception:
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
     rule_id = str(body.get("rule_id", ""))
-    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.promotion import PromotionManager
     from harness.service import get_harness_service
     try:
@@ -1348,7 +1691,8 @@ async def rollback_evolution_rule(
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
     rule_id = str(body.get("rule_id", ""))
     reason = str(body.get("reason", "manual rollback"))
-    actor = str(user_info.get("user_id") or user_info.get("role") or "authorized_user")
+    role = user_info.get("role")
+    actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.promotion import PromotionManager
     from harness.service import get_harness_service
     try:
@@ -1366,18 +1710,22 @@ async def rollback_evolution_rule(
 
 @router.get("/session/list")
 async def list_sessions(
-    request: Request,
     limit: int = 20,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
 ):
     """列出当前用户的会话"""
-    user_id = int(request.headers.get("X-User-Id", "0"))
+    user_id = user_info["user_id"]
+    tenant_id = user_info["tenant_id"]
     session_mgr = await get_session_manager()
-    sessions = await session_mgr.list_sessions(user_id, limit)
+    sessions = await session_mgr.list_sessions(user_id, max(1, min(limit, 100)), tenant_id)
     return {"success": True, "sessions": sessions}
 
 
 @router.post("/session/resume")
-async def resume_session(request: Request):
+async def resume_session(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """恢复指定会话"""
     try:
         body = await request.json()
@@ -1385,12 +1733,13 @@ async def resume_session(request: Request):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON")
 
     session_id = body.get("session_id", "")
-    user_id = int(request.headers.get("X-User-Id", "0"))
+    user_id = user_info["user_id"]
+    tenant_id = user_info["tenant_id"]
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
 
     session_mgr = await get_session_manager()
-    snapshot = await session_mgr.resume_session(session_id)
+    snapshot = await session_mgr.resume_session(session_id, user_id, tenant_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="会话不存在或已过期")
 
@@ -1402,12 +1751,77 @@ async def resume_session(request: Request):
     }
 
 
+@router.get("/session/{session_id}/execution")
+async def get_session_execution_status(
+    session_id: str,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
+    """查询会话执行状态和可恢复的图检查点信息。"""
+    status = await get_orchestrator().execution_status(
+        session_id,
+        user_info["user_id"],
+        user_info["tenant_id"],
+    )
+    if status is None:
+        raise HTTPException(status_code=404, detail="会话不存在或已过期")
+    return {"success": True, **status}
+
+
+@router.post("/session/recover")
+async def recover_session_execution(
+    request: Request,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
+    """从 LangGraph 最近一次成功的节点检查点恢复未完成执行。"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    session_id = str(body.get("session_id", "")).strip() if isinstance(body, dict) else ""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    from infra.graph_checkpointer import GraphCheckpointBusy
+    try:
+        result = await get_orchestrator().recover_session(
+            session_id,
+            user_info["user_id"],
+            user_info["tenant_id"],
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except GraphCheckpointBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception("会话图执行恢复失败")
+        raise HTTPException(status_code=500, detail="图执行恢复失败")
+    return {
+        "success": True,
+        "session_id": session_id,
+        "recovered": True,
+        "final_response": result.get("final_response", ""),
+    }
+
+
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str, request: Request):
+async def delete_session(
+    session_id: str,
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
     """删除指定会话"""
-    user_id = int(request.headers.get("X-User-Id", "0"))
+    user_id = user_info["user_id"]
+    tenant_id = user_info["tenant_id"]
     session_mgr = await get_session_manager()
-    ok = await session_mgr.delete_session(session_id, user_id)
+    try:
+        ok = await session_mgr.delete_session(session_id, user_id, tenant_id)
+    except Exception as exc:
+        from infra.graph_checkpointer import GraphCheckpointBusy
+        if isinstance(exc, GraphCheckpointBusy):
+            raise HTTPException(status_code=409, detail="会话仍在执行，请结束后重试删除")
+        raise
     if not ok:
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"success": True, "message": "会话已删除"}

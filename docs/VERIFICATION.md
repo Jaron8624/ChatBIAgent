@@ -1,6 +1,6 @@
 # NexusMind 功能验证指南
 
-本文档说明如何使用命令行工具（CLI）逐一验证 NexusMind 的所有功能模块。
+本文档说明如何验证 NexusMind 的核心代码与功能模块。离线回归测试不需要连接 LLM、Redis、Milvus 或 PostgreSQL。
 
 ---
 
@@ -12,10 +12,28 @@
 
 ---
 
-## 快速验证：一键测试
+## 快速验证：代码编译与离线回归
+
+Windows PowerShell：
+
+```powershell
+py -3.12 -m compileall -q backend tests scripts
+py -3.12 -m unittest discover -s tests -v
+```
+
+macOS / Linux：
 
 ```bash
-cd /Users/pengmouren/Documents/catdesk/EchoMind
+python3 -m compileall -q backend tests scripts
+python3 -m unittest discover -s tests -v
+```
+
+当前离线回归共 74 项，覆盖语义编译、SQL 只读执行、Embedding 故障时的 BM25 回退、会话归属、身份权限、Harness 门禁和在线观测记录。后端 API OpenAPI 可生成 56 个路由。
+
+## 快速验证：端到端功能测试
+
+```bash
+cd <项目根目录>
 python cli.py test
 ```
 
@@ -135,6 +153,8 @@ python cli.py skills stats
 ---
 
 ### 5. 权限控制（ACL）
+
+后端默认只接受认证中间件写入的身份上下文。若要在本地演示前端身份选择器，可在 `.env` 中显式设置 `NEXUSMIND_ALLOW_HEADER_IDENTITY=true`；部署环境保持关闭，并由可信认证中间件提供身份。
 
 **查看当前权限：**
 ```bash
@@ -322,4 +342,4 @@ python cli.py chat
 
 ---
 
-*文档版本：v1.0 | 最后更新：2026-08-23*
+*文档版本：v1.1 | 最后更新：2026-09-24*

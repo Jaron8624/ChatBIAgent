@@ -200,6 +200,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Windows PowerShell 可使用下面的命令完成同一流程：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
 复制并填写本地环境变量文件。至少配置一个 OpenAI 兼容 LLM 服务；Embedding/Rerank 可以按需启用。
 
 ```bash
@@ -212,11 +221,25 @@ DASHSCOPE_API_KEY=your_api_key
 BASE_URL=https://api.deepseek.com/v1
 AGENT_BASE_MODEL=deepseek-chat
 
+# 上下文原文存档使用 Fernet 加密。生成密钥后只放在本地 .env 或密钥管理服务中。
+# python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+CONTEXT_STORE_FERNET_KEY=your_generated_fernet_key
+# 回答合成输入预算估算值，需低于所用模型窗口并为输出预留空间
+SYNTHESIS_INPUT_BUDGET=12000
+SYNTHESIS_CONTEXT_WINDOW_TOKENS=16384
+SYNTHESIS_OUTPUT_TOKENS=2048
+
 # 可选：Embedding 与 rerank
 EMBEDDING_PROVIDER=siliconflow
 EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_API_KEY=your_embedding_api_key
+
+# 本地前端身份切换演示；部署环境由可信认证中间件提供用户身份
+NEXUSMIND_ALLOW_HEADER_IDENTITY=false
 ```
+
+本地身份选择器只有在本地 `.env` 中将 `NEXUSMIND_ALLOW_HEADER_IDENTITY` 设为 `true` 后才会生效；部署环境不要用浏览器请求头作为登录身份。
+上下文存档密钥不要提交到 Git。未配置密钥时，系统会拒绝存档原文；匿名访客的会话也不会写入 Redis。
 
 ### 2. 启动后端与前端
 

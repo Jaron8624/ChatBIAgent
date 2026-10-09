@@ -78,6 +78,7 @@ class MCPToolServer:
                         "name": t.name,
                         "description": t.description,
                         "inputSchema": t.input_schema,
+                        "category": t.category,
                     }
                     for t in self._tools.values()
                 ]
@@ -266,12 +267,15 @@ class MCPToolRouter:
         self.client = MCPToolClient()
         self.client.connect_local(server)
         self.reranker = LLMReranker()
+        self.last_tool_events: List[Dict[str, Any]] = []
 
     async def route_and_execute(
         self,
         query: str,
         conversation_history: Optional[List[dict]] = None,
         top_k: int = 2,
+        user_id: int = 0,
+        tenant_id: str = "default",
     ) -> List[str]:
         """
         查询改写 → 工具发现 → LLM 重排 → 执行 → 返回结果列表
@@ -280,7 +284,11 @@ class MCPToolRouter:
 
         # 1. 查询改写
         rewriter = QueryRewriter()
-        rewritten = await rewriter.rewrite(query, conversation_history)
+        rewritten = await rewriter.rewrite(
+            query,
+            conversation_history,
+            cache_scope=f"{tenant_id}:{user_id}",
+        )
 
         # 2. 发现工具
         tools_data = await self.client.list_tools()
@@ -289,6 +297,7 @@ class MCPToolRouter:
                 name=t["name"],
                 description=t["description"],
                 input_schema=t.get("inputSchema", {}),
+                category=t.get("category", "general"),
             )
             for t in tools_data
         ]
@@ -301,6 +310,7 @@ class MCPToolRouter:
 
         # 4. 执行选中的工具
         results = []
+        self.last_tool_events = []
         for tool in top_tools:
             try:
                 # 构建参数：从 query 中智能推断参数值
@@ -313,8 +323,10 @@ class MCPToolRouter:
                             # 根据参数名推断传入值
                             if "query" in key or "search" in key or "input" in key:
                                 args[key] = rewritten
-                            elif "user_id" in key:
-                                args[key] = 1  # 默认用户 ID
+                            elif key == "user_id":
+                                args[key] = int(user_id)
+                            elif key == "tenant_id":
+                                args[key] = str(tenant_id or "default")
                             elif "order_id" in key:
                                 # 从 query 中提取订单号（WM + 数字）
                                 import re
@@ -322,14 +334,38 @@ class MCPToolRouter:
                                 args[key] = m.group(0) if m else rewritten
                             else:
                                 args[key] = rewritten
+                    # Identity fields are supplied by the authenticated request,
+                    # never inferred from model output or filled with a global ID.
+                    if "user_id" in props:
+                        args["user_id"] = int(user_id)
+                    if "tenant_id" in props:
+                        args["tenant_id"] = str(tenant_id or "default")
 
                 result = await self.client.call_tool(tool.name, args)
                 # 带工具名前缀：供 synthesize 展示来源、供评测提取 called_tools
                 results.append(f"{tool.name}: {result}")
+                self.last_tool_events.append({
+                    "tool_name": tool.name,
+                    "tool_type": "business" if tool.category not in {"retrieval", "memory", "schema", "schema_retrieval", "knowledge"} else "internal",
+                    "arguments": args,
+                    "status": "success",
+                    "duration_ms": 0,
+                    "result_summary": str(result)[:240],
+                    "side_effect": "read_only",
+                })
                 logger.info(f"MCP 工具执行成功: {tool.name}")
             except Exception as e:
                 logger.error(f"MCP 工具执行失败 {tool.name}: {e}")
                 results.append(f"{tool.name}: 执行失败: {e}")
+                self.last_tool_events.append({
+                    "tool_name": tool.name,
+                    "tool_type": "business" if tool.category not in {"retrieval", "memory", "schema", "schema_retrieval", "knowledge"} else "internal",
+                    "arguments": args,
+                    "status": "error",
+                    "duration_ms": 0,
+                    "result_summary": str(e)[:240],
+                    "side_effect": "read_only",
+                })
 
         return results
 

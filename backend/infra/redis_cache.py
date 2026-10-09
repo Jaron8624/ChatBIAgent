@@ -1,5 +1,4 @@
-#这个redis_cache.py文件用于管理Redis连接，确保在应用关闭时关闭Redis连接,缓存用户画像，
-#对话的缓存由langchain提供的AsyncRedisSaver自动管理
+# 管理共享 Redis 连接并缓存用户画像；会话快照由 SessionManager 管理。
 import os
 import logging
 from dotenv import load_dotenv
