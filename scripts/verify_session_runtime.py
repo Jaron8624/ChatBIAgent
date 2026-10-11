@@ -17,7 +17,8 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -32,6 +33,8 @@ from langgraph.graph import StateGraph, START, END
 from infra import graph_checkpointer as checkpoints
 from infra import postgresql_client as postgres
 from memory.session_recovery import SessionManager
+from core.react_agent import ReActAgent, ToolExecutionUncertain
+from tools.mcp_protocol import ToolDefinition
 
 
 class ProbeState(TypedDict):
@@ -150,17 +153,58 @@ async def main():
                 result = await graph.ainvoke(None, config, durability="sync")
                 check("real_graph_resumes", result["final_response"] == "first-complete-resumed")
 
+                raw_result = "second=20;third=10;" + "完整原始证据" * 3000
+                evidence_thread = checkpoints.checkpoint_run_thread_id(thread, uuid.uuid4().hex)
+                async def load_evidence():
+                    return await graph_manager.load_session_snapshot(evidence_thread)
+                async def save_evidence(value):
+                    await graph_manager.save_session_snapshot(evidence_thread, value)
+                agent = object.__new__(ReActAgent)
+                agent.model = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(
+                    content=json.dumps({"action": "tool", "tool": "query", "args": {"day": "yesterday"}}))))
+                executor = AsyncMock(return_value=raw_result)
+                def interrupt_after_output(value):
+                    raise asyncio.CancelledError()
+                try:
+                    await agent.run("tool-evidence", [ToolDefinition("query", "query", {}, side_effect="read_only")],
+                        executor, load_progress=load_evidence, save_progress=save_evidence,
+                        result_formatter=interrupt_after_output)
+                except asyncio.CancelledError:
+                    pass
+                evidence = await load_evidence()
+                check("react_full_raw_result_persisted", evidence["tool_calls"][0]["result"] == raw_result)
+                check("react_call_metadata_persisted", bool(evidence["tool_calls"][0]["call_id"])
+                    and evidence["tool_calls"][0]["args"] == {"day": "yesterday"})
+                await session.save_session(sid, owner, messages, state={"last_execution_evidence": {
+                    "react_result": {"tool_calls": evidence["tool_calls"]}}}, tenant_id=tenant)
+                await redis.delete(f"nexusmind:session:{sid}")
+                check("tool_evidence_survives_redis_expiry", (await session.resume_session(sid, owner, tenant))
+                    .state["last_execution_evidence"]["react_result"]["tool_calls"][0]["result"] == raw_result)
+
                 await graph_manager.close()
                 await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
                 await redis.delete(f"nexusmind:session:{sid}")
                 check("connection_restart_recovers_durable_history",
                       (await session.resume_session(sid, owner, tenant)).messages == messages)
+                check("tool_evidence_survives_connection_restart",
+                      (await load_evidence())["tool_calls"][0]["result"] == raw_result)
+                restarted_agent = object.__new__(ReActAgent)
+                restarted_agent.model = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(
+                    content=json.dumps({"action": "final", "answer": "second=20;third=10"}))))
+                resumed_result = await restarted_agent.run("tool-evidence", [], executor,
+                    load_progress=load_evidence, save_progress=save_evidence,
+                    result_formatter=lambda value: str(value)[:500])
+                check("react_resume_does_not_repeat_completed_tool", executor.await_count == 1)
+                check("react_resume_uses_durable_tool_observation", "second=20;third=10" in
+                    restarted_agent.model.ainvoke.call_args.args[0][1][1])
+                check("tool_evidence_cross_tenant_denied", await session.resume_session(sid, owner, "other") is None)
 
                 await pg.mark_session_deleted(sid, owner, tenant)
                 await graph_manager.delete_thread(thread)
                 await redis.delete(f"nexusmind:session:{sid}")
                 check("deleted_session_does_not_resurrect", await session.resume_session(sid, owner, tenant) is None)
                 check("deleted_session_cannot_write", not await session.save_session(sid, owner, messages, tenant_id=tenant))
+                check("deleted_session_tool_evidence_removed", await load_evidence() is None)
                 report["status"] = "passed"
     except Exception as exc:
         report["status"] = "failed"
@@ -169,7 +213,8 @@ async def main():
     finally:
         report["source_hashes"] = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in (ROOT / "backend/memory/session_recovery.py",
-                         ROOT / "backend/infra/graph_checkpointer.py", ROOT / "backend/core/orchestrator.py")}
+                         ROOT / "backend/infra/graph_checkpointer.py", ROOT / "backend/core/orchestrator.py",
+                         ROOT / "backend/core/react_agent.py", ROOT / "backend/tools/mcp_protocol.py")}
         (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         await redis.delete(f"nexusmind:session:{sid}")
         await redis.zrem(f"nexusmind:sessions:{owner}", sid)

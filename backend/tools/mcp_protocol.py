@@ -33,6 +33,7 @@ class ToolDefinition:
     input_schema: Dict[str, Any]
     handler: Optional[Callable] = None
     category: str = "general"
+    side_effect: str = "unknown"
 
 
 # ==================== MCP Server ====================
@@ -79,6 +80,7 @@ class MCPToolServer:
                         "description": t.description,
                         "inputSchema": t.input_schema,
                         "category": t.category,
+                        "side_effect": t.side_effect,
                     }
                     for t in self._tools.values()
                 ]
@@ -120,7 +122,7 @@ class MCPToolServer:
                 "jsonrpc": "2.0",
                 "result": {
                     "content": [
-                        {"type": "text", "text": str(result) if result else ""}
+                        {"type": "text", "text": str(result) if result is not None else ""}
                     ]
                 },
                 "id": None,

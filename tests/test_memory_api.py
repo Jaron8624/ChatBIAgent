@@ -17,6 +17,9 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from infra.access_control import Permission, require_permission
+# Load transitive native dependencies outside patch.dict(sys.modules). Otherwise
+# cleanup unloads newly imported NumPy modules and a later test loads them twice.
+from memory import management as _management
 
 
 def route_app():

@@ -25,12 +25,13 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留导入，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
 from langgraph.graph import StateGraph, END
+from langchain_core.runnables import RunnableConfig
 import operator
 
 from core.intent_recognition import IntentRecognizer
 from tools.mcp_protocol import MCPToolServer, MCPToolRouter
 from evaluation.monitor import Monitor
-from core.react_agent import ReActAgent
+from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
 from core import collaboration
 from infra.tracing import Tracer, export_otel_trace
 
@@ -52,6 +53,7 @@ class AgentState(TypedDict):
     memory_result: Optional[str]
     mcp_results: List[str]
     tool_events: List[Dict[str, Any]]
+    previous_tool_evidence: List[Dict[str, Any]]
     explore_result: Optional[str]    # ExploreAgent 广泛检索结果
     plan_steps: List[str]            # PlanAgent 拆解的子任务
     plan_mode: bool                  # 是否启用显式规划模式
@@ -666,6 +668,7 @@ class Orchestrator:
         answer: str,
         run_id: str,
         token_count: int = 0,
+        execution_evidence: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Persist the visible transcript and idempotent memory-ingestion source."""
         visible_messages = Orchestrator._conversation_messages(messages)
@@ -686,7 +689,8 @@ class Orchestrator:
             session_id=session_id,
             user_id=user_id,
             messages=visible_messages,
-            state={"run_status": "completed", "last_run_id": run_id},
+            state={"run_status": "completed", "last_run_id": run_id,
+                   "last_execution_evidence": execution_evidence or {}},
             summary=answer[:200],
             token_count=token_count,
             tenant_id=tenant_id,
@@ -814,6 +818,8 @@ class Orchestrator:
                     session_mgr, session_id=session_id, user_id=user_id, tenant_id=tenant_id,
                     messages=current.messages, query=query, answer=answer, run_id=run_id,
                     token_count=int(result.get("tokens_consumed", current.token_count) or 0),
+                    execution_evidence={key: result.get(key) for key in
+                        ("tool_events", "react_result", "mcp_results", "compiled_sql")},
                 )
         except BaseException:
             try:
@@ -922,7 +928,7 @@ class Orchestrator:
                 self._external_pool_loaded = False  # 失败后允许重试
                 logger.error(f"外部 MCP Server 接入失败（降级为仅内部工具）: {e}")
 
-    async def _react_node(self, state: AgentState) -> Dict[str, Any]:
+    async def _react_node(self, state: AgentState, config: RunnableConfig = None) -> Dict[str, Any]:
         """ReAct 循环节点 — 借鉴 CatPaw Agent Loop
 
         模型在循环中反复 思考→调工具→观察结果→再思考，直到自主输出
@@ -946,27 +952,56 @@ class Orchestrator:
                     name=t["name"],
                     description=t["description"],
                     input_schema=t.get("inputSchema", {}),
+                    side_effect=t.get("side_effect", "unknown"),
                 )
                 for t in tools_data
             ]
 
+            previous = state.get("previous_tool_evidence") or []
+            if previous:
+                tool_defs.append(ToolDefinition(name="read_previous_tool_result",
+                    description="按 call_id 读取上一轮原始工具结果快照，用于核对上次结果，不代表最新数据",
+                    input_schema={"type": "object", "properties": {"call_id": {"type": "string"}},
+                                  "required": ["call_id"]}, side_effect="read_only"))
+
             async def executor(tool_name: str, args: Dict) -> str:
-                # 超长结果自动存档到 ContextStore 并返回截断+ref_id
-                result = await self.mcp_router.client.call_tool(tool_name, args)
-                from core.context_manager import ToolResultTruncator
-                truncated = ToolResultTruncator().truncate(
-                    result, ToolResultTruncator().single_max
-                )
-                return truncated
+                if tool_name == "read_previous_tool_result":
+                    item = next((item for item in previous if item.get("call_id") == args.get("call_id")), None)
+                    if item is None:
+                        raise PermissionError("当前会话中不存在此工具证据")
+                    return item.get("result", "")
+                return await self.mcp_router.client.call_tool(tool_name, args)
+
+            from core.context_manager import ToolResultTruncator
+            truncator = ToolResultTruncator()
+            from infra.graph_checkpointer import get_graph_checkpointer_manager
+            manager = get_graph_checkpointer_manager()
+            execution_thread = (config or {}).get("configurable", {}).get("thread_id")
+
+            async def load_progress():
+                return await manager.load_session_snapshot(execution_thread)
+
+            async def save_progress(progress):
+                if not await manager.save_session_snapshot(execution_thread, progress):
+                    raise ToolEvidencePersistenceError("工具检查点未保存")
+
+            history = list(state.get("messages", []))
 
             react_result = await self.react_agent.run(
                 query=state["query"],
                 tools=tool_defs,
                 tool_executor=executor,
-                conversation_history=state.get("messages", []),
+                conversation_history=history,
+                load_progress=load_progress if execution_thread and manager.saver else None,
+                save_progress=save_progress if execution_thread and manager.saver else None,
+                result_formatter=lambda raw: truncator.truncate(str(raw), truncator.single_max),
+                evidence_index=json.dumps([{"call_id": item.get("call_id"), "tool": item.get("tool"),
+                    "args": item.get("args"), "queried_at": item.get("finished_at")}
+                    for item in previous], ensure_ascii=False) if previous else "",
             )
             latency = (time.time() - start) * 1000
-            self.monitor.record("react_loop", latency, True, tokens=0)
+            self.monitor.record("react_loop", latency,
+                                react_result.get("termination_reason") != "parse_error", tokens=0)
 
             # ReAct 的 answer 作为最终回答，工具链转为 mcp_results 供
             # synthesize 展示来源与评测提取 called_tools
@@ -989,19 +1024,28 @@ class Orchestrator:
                         "tool_type": "internal" if str(item.get("tool", "")).startswith(("search_", "get_memory", "get_table")) else "business",
                         "arguments": item.get("args", {}),
                         "status": "success" if item.get("ok") else "error",
-                        "duration_ms": 0,
-                        "result_summary": "",
-                        "side_effect": "read_only",
+                        "call_id": item.get("call_id"),
+                        "duration_ms": item.get("duration_ms", 0),
+                        "result_summary": str(item.get("result", item.get("error", "")))[:500],
+                        "result": item.get("result"),
+                        "error": item.get("error"),
+                        "started_at": item.get("started_at"),
+                        "finished_at": item.get("finished_at"),
+                        "side_effect": item.get("side_effect", "unknown"),
                     }
                     for item in react_result.get("tool_calls", [])
                 ],
                 "react_result": {
                     "iterations": react_result.get("iterations", 0),
                     "tool_calls": react_result.get("tool_calls", []),
+                    "trace": react_result.get("trace", []),
                     "forced_final": react_result.get("forced_final", False),
                     "termination_reason": react_result.get("termination_reason", ""),
                 },
             }
+        except (ToolEvidencePersistenceError, ToolExecutionUncertain):
+            # Never turn a missing durable outcome into a successful fallback.
+            raise
         except Exception as e:
             latency = (time.time() - start) * 1000
             self.monitor.record("react_loop", latency, False, tokens=0)
@@ -1749,6 +1793,7 @@ class Orchestrator:
         # Keep original text separate from the compressed model window. Neither
         # injected memories nor tool traces can overwrite the durable transcript.
         canonical_messages = self._conversation_messages(messages)
+        previous_evidence = ((snapshot.state.get("last_execution_evidence") or {}).get("react_result") or {}).get("tool_calls", []) if snapshot else []
         messages = [dict(message) for message in (messages or [])]
 
         # 关键：graph 内部节点使用 resumed_sid 发事件，回调需注册到 resumed_sid 下
@@ -1817,6 +1862,7 @@ class Orchestrator:
             "memory_result": None,
             "mcp_results": [],
             "tool_events": [],
+            "previous_tool_evidence": previous_evidence,
             "explore_result": None,
             "plan_steps": [],
             "plan_mode": False,
@@ -1911,6 +1957,8 @@ class Orchestrator:
                     answer=str(result.get("final_response") or result.get("response") or ""),
                     run_id=run_id,
                     token_count=int(result.get("tokens_consumed", 0) or 0),
+                    execution_evidence={key: result.get(key) for key in
+                        ("tool_events", "react_result", "mcp_results", "compiled_sql")},
                 )
 
         async def save_interrupted_state():
