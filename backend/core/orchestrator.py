@@ -979,7 +979,10 @@ class Orchestrator:
             execution_thread = (config or {}).get("configurable", {}).get("thread_id")
 
             async def load_progress():
-                return await manager.load_session_snapshot(execution_thread)
+                try:
+                    return await manager.load_session_snapshot(execution_thread)
+                except Exception as exc:
+                    raise ToolEvidencePersistenceError("无法读取工具检查点，停止执行以避免重复调用") from exc
 
             async def save_progress(progress):
                 if not await manager.save_session_snapshot(execution_thread, progress):

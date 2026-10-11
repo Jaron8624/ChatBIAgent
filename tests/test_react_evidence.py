@@ -131,6 +131,46 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OrchestratorEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def orchestrator(self, decisions):
+        value = object.__new__(Orchestrator)
+        value.mcp_router = SimpleNamespace(client=SimpleNamespace(list_tools=AsyncMock(return_value=[]),
+                                                                 call_tool=AsyncMock()))
+        value.monitor = MagicMock()
+        value._emit = AsyncMock()
+        value._load_external_mcp_pool = AsyncMock()
+        value.react_agent = object.__new__(ReActAgent)
+        value.react_agent.model = SimpleNamespace(ainvoke=AsyncMock(side_effect=[
+            SimpleNamespace(content=json.dumps(item)) for item in decisions]))
+        return value
+
+    async def test_checkpoint_read_failure_does_not_fall_back(self):
+        value = self.orchestrator([])
+        manager = SimpleNamespace(saver=object(), load_session_snapshot=AsyncMock(side_effect=ConnectionError()))
+        with patch("infra.graph_checkpointer.get_graph_checkpointer_manager", return_value=manager):
+            with self.assertRaises(ToolEvidencePersistenceError):
+                await value._react_node({"query": "q"}, {"configurable": {"thread_id": "owner-run"}})
+        value.react_agent.model.ainvoke.assert_not_awaited()
+        value.mcp_router.client.call_tool.assert_not_awaited()
+
+    async def test_next_turn_reads_only_current_session_evidence(self):
+        for call_id, expected_ok in (("owned", True), ("other-session", False)):
+            with self.subTest(call_id=call_id):
+                value = self.orchestrator([
+                    {"action": "tool", "tool": "read_previous_tool_result", "args": {"call_id": call_id}},
+                    {"action": "final", "answer": "done"}])
+                with patch("infra.graph_checkpointer.get_graph_checkpointer_manager",
+                           return_value=SimpleNamespace(saver=None)):
+                    result = await value._react_node({"query": "第二名是多少", "messages": [],
+                        "previous_tool_evidence": [{"call_id": "owned", "tool": "query",
+                                                   "args": {"day": "yesterday"}, "result": "second=20"}]})
+                event = result["react_result"]["tool_calls"][0]
+                self.assertEqual(event["ok"], expected_ok)
+                if expected_ok:
+                    self.assertEqual(event["result"], "second=20")
+                else:
+                    self.assertNotIn("result", event)
+                value.mcp_router.client.call_tool.assert_not_awaited()
+
     async def test_real_graph_node_receives_run_config_and_saves_full_evidence(self):
         raw = "SQL-result-" * 1500
         server = MCPToolServer()
