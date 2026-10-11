@@ -199,6 +199,27 @@ async def main():
                     restarted_agent.model.ainvoke.call_args.args[0][1][1])
                 check("tool_evidence_cross_tenant_denied", await session.resume_session(sid, owner, "other") is None)
 
+                rotated_key = Fernet.generate_key().decode("ascii")
+                await graph_manager.close()
+                with patch.dict(os.environ, {"GRAPH_CHECKPOINT_IDENTITY_KEY": test_key,
+                    "GRAPH_CHECKPOINT_FERNET_KEY": rotated_key,
+                    "GRAPH_CHECKPOINT_PREVIOUS_KEYS": test_key}):
+                    await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
+                    await redis.delete(f"nexusmind:session:{sid}")
+                    check("key_rotation_preserves_thread_identity",
+                          checkpoints.checkpoint_thread_id(sid, owner, tenant) == thread)
+                    check("new_keyring_reads_old_durable_evidence",
+                          (await load_evidence())["tool_calls"][0]["result"] == raw_result)
+                    rotation_thread = checkpoints.checkpoint_thread_id("rotation-probe", owner, tenant)
+                    await graph_manager.save_session_snapshot(rotation_thread, {"marker": "new-key"})
+                    await graph_manager.close()
+                    with patch.dict(os.environ, {"GRAPH_CHECKPOINT_PREVIOUS_KEYS": ""}):
+                        await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
+                        check("new_writes_readable_without_old_key",
+                              (await graph_manager.load_session_snapshot(rotation_thread))["marker"] == "new-key")
+                    await graph_manager.close()
+                await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
+
                 await pg.mark_session_deleted(sid, owner, tenant)
                 await graph_manager.delete_thread(thread)
                 await redis.delete(f"nexusmind:session:{sid}")

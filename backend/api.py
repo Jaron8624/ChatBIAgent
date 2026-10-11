@@ -47,6 +47,18 @@ from memory.session_recovery import get_session_manager
 from tools.mcp_protocol import MCPServerPool, create_mcp_pool_from_env
 from harness.runtime import get_harness_runtime
 from infra.llm_usage import UsageTracker
+from infra.async_io import run_blocking
+
+
+async def harness_io(method, *args, **kwargs):
+    """Resolve the service and run a synchronous store operation off the event loop."""
+    def execute():
+        from harness.service import get_harness_service
+        target = get_harness_service()
+        for part in method.split("."):
+            target = getattr(target, part)
+        return target(*args, **kwargs)
+    return await run_blocking(execute)
 from rag.knowledge_consistency import KnowledgeOperations, namespace_id, visible_names, bound_client
 
 # 配置日志
@@ -253,28 +265,15 @@ async def file_upload(
                     is_duplicate=True,
                 )
 
-            # 确保 background_tasks 不为 None
-            if background_tasks is None:
-                background_tasks = BackgroundTasks()
-
-            # DocumentProcessor 需要改为异步版本
-            document_instance = DocumentProcessor(hash_storage)
-
-            # 将文档处理任务添加到后台（处理完成后会自动清理临时文件，传入 user_id）
-            # process_document 需要是异步函数
-            background_tasks.add_task(
-                document_instance.process_document,
-                temp_file_path=temp_file_path,
-                filename=filename,
-                file_hash=file_hash,
-                knowledge_base_id=storage_id,
-                user_id=user_id,
-            )
+            from rag.jobs import enqueue
+            job_id = await enqueue(pg, temp_file_path, filename, file_hash, storage_id, user_id)
+            await temp_processor.delete_temp_file(temp_file_path)
 
             # 立即返回
             return DocumentUploadResponse(
                 filename=filename,
                 message="文档已上传，正在后台处理中",
+                job_id=job_id,
                 file_hash=file_hash,
                 knowledge_base_id=knowledge_base_id,
                 is_duplicate=False,
@@ -313,6 +312,9 @@ async def create_knowledge_base(
         user_info.get("tenant_id", "default"), create=True)
     async with KnowledgeOperations(postgresql_client, None).lock(storage_id, user_id) as conn:
         result = await bound_client(postgresql_client, conn).create_knowledge_base(storage_id, user_id)
+        if result["success"]:
+            await conn.execute("""DELETE FROM rag_operations WHERE knowledge_base_id=$1
+                AND user_id=$2 AND file_hash='' AND kind='delete' AND state='complete'""", storage_id, user_id)
 
     if not result["success"]:
         if "已存在" in result["message"]:
@@ -492,6 +494,11 @@ async def document_status(
     storage_id = await namespace_id(postgresql_client, knowledge_base_id, owner,
         user_info.get("tenant_id", "default"))
     async with postgresql_client.pool.acquire() as conn:
+        job = await conn.fetchrow("""SELECT job_id,state,attempts,error_type,updated_at
+            FROM rag_upload_jobs WHERE knowledge_base_id=$1 AND user_id=$2 AND file_hash=$3
+            ORDER BY created_at DESC LIMIT 1""", storage_id, owner, file_hash)
+        if job is not None:
+            return dict(job)
         row = await conn.fetchrow("""SELECT kind,state,error_type,updated_at FROM rag_operations
             WHERE knowledge_base_id=$1 AND user_id=$2 AND file_hash=$3""", storage_id, owner, file_hash)
     if row is None:
@@ -530,8 +537,8 @@ async def chat_orchestrate(
 
     start = asyncio.get_event_loop().time()
     try:
-        runtime = get_harness_runtime()
-        with runtime.request_scope(tenant_id, user_id) as release:
+        runtime = await run_blocking(get_harness_runtime)
+        async with runtime.async_request_scope(tenant_id, user_id) as release:
             with UsageTracker() as tracker:
                 result = await orchestrator.process(
                     query=query,
@@ -552,7 +559,7 @@ async def chat_orchestrate(
                 "model_call_count": int(usage.get("calls", 0) or 0),
             })
         latency = (asyncio.get_event_loop().time() - start) * 1000
-        release_observation = runtime.observe(release, result, latency)
+        release_observation = await run_blocking(runtime.observe, release, result, latency)
 
         return {
             "success": True,
@@ -617,7 +624,7 @@ async def chat_orchestrate_stream(
         queue = asyncio.Queue()
         final_result = {"final_response": ""}
         spans = []
-        runtime = get_harness_runtime()
+        runtime = await run_blocking(get_harness_runtime)
         release = None
 
         async def on_event(event_type, data):
@@ -627,7 +634,7 @@ async def chat_orchestrate_stream(
             nonlocal release
             started = asyncio.get_event_loop().time()
             try:
-                with runtime.request_scope(tenant_id, user_id) as selected_release:
+                async with runtime.async_request_scope(tenant_id, user_id) as selected_release:
                     release = selected_release
                     with UsageTracker() as tracker:
                         result = await orchestrator.process(
@@ -649,7 +656,7 @@ async def chat_orchestrate_stream(
                         "estimated_cost": float(usage.get("estimated_cost", 0.0) or 0.0),
                         "model_call_count": int(usage.get("calls", 0) or 0),
                     })
-                runtime.observe(
+                await run_blocking(runtime.observe,
                     release,
                     result,
                     (asyncio.get_event_loop().time() - started) * 1000,
@@ -659,7 +666,7 @@ async def chat_orchestrate_stream(
             except Exception as e:
                 logger.error(f"编排流式对话失败: {e}", exc_info=True)
                 if release is not None:
-                    runtime.observe(
+                    await run_blocking(runtime.observe,
                         release,
                         {"error_info": str(e), "trace_id": ""},
                         (asyncio.get_event_loop().time() - started) * 1000,
@@ -1240,11 +1247,11 @@ async def list_harness_datasets(
     user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
 ):
     from harness.service import get_harness_service
-    service = get_harness_service()
+    service = await run_blocking(get_harness_service)
     return {
         "success": True,
         "default_dataset_version_id": service.default_dataset_version_id,
-        "datasets": service.store.list_datasets(),
+        "datasets": await run_blocking(service.store.list_datasets),
     }
 
 
@@ -1258,7 +1265,7 @@ async def list_harness_bad_cases(
     statuses = [status] if status else None
     return {
         "success": True,
-        "bad_cases": get_harness_service().store.list_bad_cases(
+        "bad_cases": await harness_io("store.list_bad_cases",
             limit=min(limit, 500), statuses=statuses
         ),
     }
@@ -1278,7 +1285,7 @@ async def review_harness_bad_case(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "reviewer")
     from harness.service import get_harness_service
     try:
-        reviewed = get_harness_service().store.review_bad_case(
+        reviewed = await harness_io("store.review_bad_case",
             bad_case_id=bad_case_id,
             decision=str(body.get("decision", "")),
             actor=actor,
@@ -1308,7 +1315,7 @@ async def promote_bad_cases_to_harness_dataset(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "reviewer")
     from harness.service import get_harness_service
     try:
-        result = get_harness_service().promote_bad_cases_to_dataset(
+        result = await harness_io("promote_bad_cases_to_dataset",
             name=name,
             bad_case_ids=bad_case_ids,
             case_overrides=dict(body.get("case_overrides") or {}),
@@ -1332,7 +1339,7 @@ async def list_harness_candidates(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "candidates": get_harness_service().store.list_candidates(status=status),
+        "candidates": await harness_io("store.list_candidates", status=status),
     }
 
 
@@ -1344,7 +1351,7 @@ async def list_harness_experiments(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "experiments": get_harness_service().store.list_experiments(limit=min(limit, 200)),
+        "experiments": await harness_io("store.list_experiments", limit=min(limit, 200)),
     }
 
 
@@ -1354,7 +1361,7 @@ async def get_harness_experiment(
     user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
 ):
     from harness.service import get_harness_service
-    experiment = get_harness_service().store.get_experiment(experiment_id)
+    experiment = await harness_io("store.get_experiment", experiment_id)
     if not experiment:
         raise HTTPException(status_code=404, detail="实验不存在")
     return {"success": True, "experiment": experiment}
@@ -1369,7 +1376,7 @@ async def list_harness_audit(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "events": get_harness_service().store.list_audit(entity_id, min(limit, 500)),
+        "events": await harness_io("store.list_audit", entity_id, min(limit, 500)),
     }
 
 
@@ -1383,7 +1390,7 @@ async def list_harness_observability(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "events": get_harness_service().store.list_observability_events(
+        "events": await harness_io("store.list_observability_events",
             limit=min(limit, 500), candidate_id=candidate_id, tenant_id=tenant_id
         ),
     }
@@ -1399,7 +1406,7 @@ async def get_harness_observability_summary(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "summary": get_harness_service().store.observability_summary(
+        "summary": await harness_io("store.observability_summary",
             candidate_id=candidate_id, tenant_id=tenant_id, limit=min(limit, 5000)
         ),
     }
@@ -1414,7 +1421,7 @@ async def list_harness_annotations(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "annotations": get_harness_service().store.list_human_annotations(
+        "annotations": await harness_io("store.list_human_annotations",
             subject_id=subject_id,
             limit=min(limit, 500),
         ),
@@ -1440,7 +1447,7 @@ async def add_harness_annotation(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
     try:
-        annotation_id = get_harness_service().store.add_human_annotation(
+        annotation_id = await harness_io("store.add_human_annotation",
             subject_type=subject_type,
             subject_id=subject_id,
             metric=metric,
@@ -1461,7 +1468,7 @@ async def get_harness_judge_calibration(
     from harness.service import get_harness_service
     return {
         "success": True,
-        "calibration": get_harness_service().store.judge_calibration_summary(),
+        "calibration": await harness_io("store.judge_calibration_summary"),
     }
 
 
@@ -1544,7 +1551,7 @@ async def approve_evolution_release(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
     try:
-        result = get_harness_service().approve_candidate(
+        result = await harness_io("approve_candidate",
             rule.harness_candidate_id,
             actor,
             str(body.get("gate_decision_id", "")),
@@ -1568,11 +1575,11 @@ async def start_evolution_shadow(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
     try:
-        result = get_harness_service().start_shadow_release(
+        result = await harness_io("start_shadow_release",
             rule.harness_candidate_id, actor, str(body.get("gate_decision_id", "")), int(body.get("observation_seconds", 300))
         )
         return {"success": True, "shadow": result}
-    except (KeyError, PermissionError, ValueError) as exc:
+    except (KeyError, PermissionError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
@@ -1589,7 +1596,7 @@ async def start_evolution_canary(
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
     try:
-        result = get_harness_service().start_canary_release(
+        result = await harness_io("start_canary_release",
             rule.harness_candidate_id,
             actor,
             str(body.get("gate_decision_id", "")),
@@ -1613,7 +1620,7 @@ async def route_evolution_canary(
     if not rule or not rule.harness_candidate_id:
         raise HTTPException(status_code=404, detail="规则或 Harness candidate 不存在")
     from harness.service import get_harness_service
-    return {"success": True, "route": get_harness_service().release_controller.route_for_canary(rule.harness_candidate_id, tenant_id, user_id)}
+    return {"success": True, "route": await harness_io("release_controller.route_for_canary", rule.harness_candidate_id, tenant_id, user_id)}
 
 
 @router.post("/evolution/canary/observe")
@@ -1628,7 +1635,7 @@ async def observe_evolution_canary(
     role = user_info.get("role")
     actor = f"role:{getattr(role, 'value', role)}" if role else str(user_info.get("user_id") or "authorized_user")
     from harness.service import get_harness_service
-    result = get_harness_service().release_controller.record_observation(
+    result = await harness_io("release_controller.record_observation",
         rule.harness_candidate_id,
         actor,
         str(body.get("sample_id", "")),

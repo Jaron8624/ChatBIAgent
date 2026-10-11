@@ -93,8 +93,7 @@ class ReleaseController:
         candidate = self.store.get_candidate(candidate_id)
         if not candidate:
             raise KeyError(candidate_id)
-        if candidate["status"] == CandidateStatus.EVALUATED.value:
-            self.store.transition_candidate(candidate_id, CandidateStatus.SHADOW, actor, "shadow release started", gate["decision_id"])
+        self.store.transition_candidate(candidate_id, CandidateStatus.SHADOW, actor, "shadow release started", gate["decision_id"])
         payload = {"gate_decision_id": gate["decision_id"], "observation_seconds": int(observation_seconds), "started_at_epoch": time.time()}
         self.store.audit("candidate", candidate_id, "shadow_started", actor, payload)
         return payload
@@ -115,8 +114,6 @@ class ReleaseController:
         candidate = self.store.get_candidate(candidate_id)
         if not candidate:
             raise KeyError(candidate_id)
-        if candidate["status"] == CandidateStatus.EVALUATED.value:
-            self.store.transition_candidate(candidate_id, CandidateStatus.SHADOW, actor, "canary release started", gate["decision_id"])
         payload = {
             "gate_decision_id": gate["decision_id"],
             "traffic_percent": float(traffic_percent),
@@ -124,15 +121,24 @@ class ReleaseController:
             "observation_seconds": int(observation_seconds),
             "started_at_epoch": time.time(),
         }
+        self.store.transition_candidate(candidate_id, CandidateStatus.SHADOW, actor,
+            "canary release started", gate["decision_id"],
+            release_update={"canary_id": candidate_id, "policy_json": payload})
         self.store.audit("candidate", candidate_id, "canary_started", actor, payload)
         return payload
 
     def route_for_canary(self, candidate_id: str, tenant_id: str, user_id: str = "") -> Dict[str, Any]:
+        candidate = self.store.get_candidate(candidate_id)
+        if not candidate or candidate["status"] != CandidateStatus.SHADOW.value:
+            return {"candidate_id": candidate_id, "selected": False, "reason": "candidate_not_in_canary"}
+        channel = self.store.get_release_channel(str(tenant_id)) or self.store.get_release_channel()
+        if channel and channel.get("canary_id") != candidate_id:
+            return {"candidate_id": candidate_id, "selected": False, "reason": "candidate_not_in_release_channel"}
         events = self.store.list_audit(candidate_id, limit=200)
         started = next((item for item in events if item["action"] in {"canary_started", "shadow_started"}), None)
         if not started:
             return {"candidate_id": candidate_id, "selected": False, "reason": "canary_not_started"}
-        payload = started.get("payload_json") or {}
+        payload = (channel.get("policy_json") if channel else started.get("payload_json")) or {}
         allowlist = set(payload.get("tenant_ids") or [])
         if allowlist and str(tenant_id) not in allowlist:
             return {"candidate_id": candidate_id, "selected": False, "reason": "tenant_not_in_canary"}
@@ -231,8 +237,9 @@ class ReleaseController:
             raise PermissionError("candidate needs an explicit release approval")
         if candidate["status"] == CandidateStatus.SHADOW.value and not force and not self.canary_ready(candidate_id):
             raise PermissionError("shadow/canary observation window has not elapsed")
-        if candidate["status"] != CandidateStatus.ACTIVE.value:
-            self.store.transition_candidate(candidate_id, CandidateStatus.ACTIVE, actor, "released after Gate and approval", gate["decision_id"])
+        self.store.transition_candidate(candidate_id, CandidateStatus.ACTIVE, actor,
+            "released after Gate and approval", gate["decision_id"],
+            release_update={"active_id": candidate_id, "canary_id": None, "policy_json": {}})
         payload = {"candidate_id": candidate_id, "gate_decision_id": gate["decision_id"], "status": CandidateStatus.ACTIVE.value}
         self.store.audit("candidate", candidate_id, "released", actor, payload)
         return payload
@@ -242,8 +249,18 @@ class ReleaseController:
         candidate = self.store.get_candidate(candidate_id)
         if not candidate:
             raise KeyError(candidate_id)
-        if candidate["status"] != CandidateStatus.ROLLED_BACK.value:
-            self.store.transition_candidate(candidate_id, CandidateStatus.ROLLED_BACK, actor, reason)
+        channel = self.store.get_release_channel() or {}
+        patch = None
+        if channel.get("canary_id") == candidate_id:
+            patch = {"canary_id": None, "policy_json": {}}
+        elif channel.get("active_id") == candidate_id:
+            previous = self.store.get_candidate(channel.get("previous_id", ""))
+            fallback = previous["candidate_id"] if previous and previous["status"] == CandidateStatus.ACTIVE.value else None
+            patch = {"active_id": fallback, "previous_id": None}
+        if patch is not None:
+            patch["_expected_version"] = channel["version"]
+        self.store.transition_candidate(candidate_id, CandidateStatus.ROLLED_BACK, actor, reason,
+            release_update=patch)
         payload = {"candidate_id": candidate_id, "status": CandidateStatus.ROLLED_BACK.value, "reason": reason}
         self.store.audit("candidate", candidate_id, "rolled_back", actor, payload)
         return payload

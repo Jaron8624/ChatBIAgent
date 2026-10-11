@@ -66,14 +66,37 @@ class KnowledgeOperations:
             kind=EXCLUDED.kind,state=EXCLUDED.state,error_type=EXCLUDED.error_type,updated_at=now()""",
             key, kb, owner, file_hash, kind, state, error)
 
-    async def upload(self, kb, owner, file_hash, filename, parents, chunks, hashes):
+    async def upload(self, kb, owner, file_hash, filename, parents, chunks, hashes, expected_generation=None, publish_guard=None):
+        async with self.pg.pool.acquire() as connection:
+            generation = await connection.fetchval("SELECT created_at FROM knowledge_bases WHERE knowledge_base_id=$1 AND user_id=$2", kb, owner)
+        generation = expected_generation if expected_generation is not None else generation
+        # Remote embedding must finish before taking a database lock. Recheck
+        # deletion state and duplicate status after acquiring the lock.
+        prepare = getattr(self.milvus, "prepare_chunks", None)
+        if prepare is None:
+            manager = getattr(self.milvus, "knowledge_base_manager", self.milvus)
+            embeddings = getattr(manager, "embeddings", None)
+            if embeddings is not None:
+                async def prepare(items):
+                    return await embeddings.aembed_documents([item.page_content for item in items])
+        vectors = await prepare(chunks) if chunks and prepare is not None else None
         async with self.lock(kb, owner) as conn:
+            if publish_guard is not None:
+                await publish_guard(conn)
             pg = bound_client(self.pg, conn)
+            current = await conn.fetchval("SELECT created_at FROM knowledge_bases WHERE knowledge_base_id=$1 AND user_id=$2", kb, owner)
+            if generation is not None and generation != current:
+                raise ValueError("knowledge_base_generation_changed")
             pending_delete = await conn.fetchval("""SELECT 1 FROM rag_operations
                 WHERE knowledge_base_id=$1 AND user_id=$2 AND file_hash=''
                 AND kind='delete' AND state <> 'complete'""", kb, owner)
             if pending_delete:
                 raise RuntimeError("知识库删除尚未完成，请先重试删除")
+            deleted = await conn.fetchval("""SELECT 1 FROM rag_operations
+                WHERE knowledge_base_id=$1 AND user_id=$2 AND file_hash=''
+                AND kind='delete' AND state='complete'""", kb, owner)
+            if deleted:
+                raise RuntimeError("知识库已删除，不能发布准备中的文件")
             if await pg.is_file_duplicate(file_hash, kb, owner):
                 return False
             await self.state(conn, kb, owner, file_hash, "upload", "prepared")
@@ -87,11 +110,14 @@ class KnowledgeOperations:
                     WHERE file_hash=$1 AND knowledge_base_id=$2 AND user_id=$3""", file_hash, kb, owner)
                 await pg.add_parent_chunk_batch(parents, owner)
                 if chunks:
-                    result = await self.milvus.add_chunks_batch(knowledge_base_id=kb, chunks=chunks, user_id=owner)
+                    options = {"vectors": vectors} if vectors is not None else {}
+                    result = await self.milvus.add_chunks_batch(knowledge_base_id=kb, chunks=chunks, user_id=owner, **options)
                     if result is False:
                         raise RuntimeError("Vector insertion reported failure")
                 await pg.batch_add_chunk_hashes(hashes, file_hash, kb, owner)
                 async with conn.transaction():
+                    if publish_guard is not None:
+                        await publish_guard(conn)
                     await conn.execute("""UPDATE file_metadata SET ingestion_state='complete'
                         WHERE file_hash=$1 AND knowledge_base_id=$2 AND user_id=$3""", file_hash, kb, owner)
                     await self.state(conn, kb, owner, file_hash, "upload", "complete")

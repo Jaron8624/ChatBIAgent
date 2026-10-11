@@ -100,6 +100,13 @@ class EvolutionLoop:
     # ==================== 单轮进化 ====================
 
     async def tick(self) -> Dict:
+        from infra.scheduler import maintenance_leader
+        async with maintenance_leader("self-evolution") as leader:
+            if not leader:
+                return {"status": "busy", "reason": "another_worker_owns_evolution"}
+            return await self._tick()
+
+    async def _tick(self) -> Dict:
         """执行一轮进化：拉取未处理 BadCase → 抽取规则 → 自动决策
 
         Returns:

@@ -6,6 +6,9 @@ import logging
 import os
 import sys
 import uuid
+import tempfile
+import zipfile
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +22,9 @@ from langchain_core.documents import Document
 from infra.postgresql_client import PostgreSQLParentClient
 from rag.knowledeg_base_manager import KnowledgeBaseManager, _scope_filter
 from rag.knowledge_consistency import DDL, KnowledgeOperations, namespace_id, visible_names
+from rag.jobs import DDL as JOB_DDL, enqueue, UploadWorker
+from rag.index_contract import DDL as INDEX_DDL, bind_collection, fingerprint, index_configuration
+from rag.documents_process import DocumentProcessor
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -43,6 +49,8 @@ async def main():
         "source_hashes": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in
             ("backend/rag/knowledge_consistency.py", "backend/infra/postgresql_client.py",
              "backend/rag/documents_process.py", "backend/rag/knowledeg_base_manager.py",
+             "backend/rag/jobs.py", "backend/rag/index_contract.py", "backend/rag/milvus_client.py",
+             "scripts/rebuild_embeddings.py",
              "backend/api.py", "backend/tools/tools.py", "scripts/verify_knowledge_runtime.py")}}
     admin = pool = client = None
     created_schema = created_collection = False
@@ -80,6 +88,8 @@ async def main():
                 VALUES('old-broken','broken.docx','legacy-empty',77)""")
             await conn.execute(DDL)
             await conn.execute(DDL)
+            await conn.execute(JOB_DDL)
+            await conn.execute(INDEX_DDL)
         pg = object.__new__(PostgreSQLParentClient)
         pg.pool = pool
         check("legacy_empty_metadata_no_longer_blocks_retry", not await pg.is_file_duplicate("old-broken", "legacy-empty", 77))
@@ -160,6 +170,67 @@ async def main():
         check("whole_kb_delete_clears_both_stores", await vector_rows(a) == [] and await visible_names(pg, 7, "tenant-a") == [])
         check("whole_kb_delete_preserves_other_tenant", await pg.get_parents(["parent-b"], b, 7) == ["shared synthetic knowledge"])
         check("whole_kb_delete_idempotent", (await restarted.delete(a, 7))["success"])
+        # Actual DOCX parser + durable job worker + actual vector writes. The
+        # embedding itself remains deterministic, not a model-quality claim.
+        with tempfile.TemporaryDirectory(prefix="nexusmind-upload-check-") as sources:
+            path = Path(sources) / "fixture.docx"
+            with zipfile.ZipFile(path, "w") as doc:
+                doc.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Durable upload fixture knowledge about orders.</w:t></w:r></w:p></w:body></w:document>')
+            processor = DocumentProcessor()
+            processor._milvus_client = manager
+            env = {"UPLOAD_STORAGE_ROOT": sources}
+            with patch.dict(os.environ, env), patch("rag.documents_process.get_postgresql_client", AsyncMock(return_value=pg)):
+                job = await enqueue(pg, path, "fixture.docx", "durable-doc", b, 7)
+                worker = UploadWorker(pg, processor, lease_seconds=3)
+                abandoned = await worker.claim()
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE rag_upload_jobs SET lease_until=now()-interval '1 second' WHERE job_id=$1", job)
+                check("durable_job_survives_worker_recreation", await UploadWorker(pg, processor, 3).run_once())
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow("SELECT state,attempts FROM rag_upload_jobs WHERE job_id=$1", job)
+                check("expired_lease_reclaimed_and_real_docx_published", row["state"] == "complete" and row["attempts"] == 2)
+                check("actual_worker_file_visible", any(f["file_hash"] == "durable-doc" for f in (await pg.get_knowledge_base_files(b, 7))["files"]))
+                await worker.run_once()
+                check("completed_job_not_executed_again", not await worker.run_once())
+                file_stale = await enqueue(pg, path, "fixture.docx", "deleted-file", b, 7)
+                await restarted.delete(b, 7, "deleted-file")
+                await worker.run_once()
+                async with pool.acquire() as conn:
+                    state = await conn.fetchval("SELECT state FROM rag_upload_jobs WHERE job_id=$1", file_stale)
+                check("queued_job_cannot_resurrect_deleted_file", state == "failed")
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE rag_upload_jobs SET updated_at=now()-interval '31 days' WHERE job_id=$1", job)
+                check("retention_removes_only_expired_terminal_sources", await worker.cleanup_sources() == 1)
+                check("retention_preserves_recent_failed_source", (Path(sources) / file_stale).is_file())
+                stale = await enqueue(pg, path, "fixture.docx", "deleted-generation", b, 7)
+                await restarted.delete(b, 7)
+                await worker.run_once()
+                async with pool.acquire() as conn:
+                    state = await conn.fetchval("SELECT state FROM rag_upload_jobs WHERE job_id=$1", stale)
+                check("prepared_job_cannot_resurrect_deleted_kb", state == "failed")
+        config = {**index_configuration(2, "knowledge"), "model": "fixture-v1"}
+        await bind_collection(pg, client, schema, config, adopt_legacy=True)
+        try:
+            await bind_collection(pg, client, schema, {**config, "model": "fixture-v2"})
+        except ValueError:
+            check("same_dimension_model_change_rejected", True)
+        else:
+            raise AssertionError("index contract allowed model mixing")
+        async with pool.acquire() as conn:
+            saved = await conn.fetchval("SELECT fingerprint FROM rag_index_contracts WHERE collection_name=$1", schema)
+        check("index_contract_retains_old_fingerprint", saved == fingerprint(config))
+        from rebuild_embeddings import rebuild
+        rebuilt = schema + "_rebuilt"
+        try:
+            result = await rebuild(pg, client, FixtureVectors(), schema, rebuilt, "knowledge", 2,
+                acknowledge_legacy_chunks=True)
+            check("embedding_rebuild_preserves_source_collection", await client.has_collection(schema))
+            check("embedding_rebuild_validates_row_count", result["row_count"] > 0)
+            rebuilt_manager = KnowledgeBaseManager(client=client, embeddings=FixtureVectors(), collection_name=rebuilt, dense_dim=2)
+            check("embedding_rebuild_has_valid_contract", result["config"]["dimension"] == 2)
+        finally:
+            if await client.has_collection(rebuilt):
+                await client.drop_collection(rebuilt)
         report["status"] = "passed"
     except Exception as exc:
         report["status"] = "failed"

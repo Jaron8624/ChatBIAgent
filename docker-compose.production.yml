@@ -1,0 +1,33 @@
+# Additive production overlay. Place behind an authenticated TLS gateway.
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a unique production database password}
+  minio:
+    ports: !reset []
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set a production object storage account}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set a production object storage secret}
+  milvus:
+    ports: !reset []
+    volumes:
+      - ./deploy/milvus-production.yaml:/milvus/configs/user.yaml:ro
+    environment:
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?Set a production object storage account}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?Set a production object storage secret}
+  backend:
+    environment:
+      NEXUSMIND_ENV: production
+      NEXUSMIND_SCHEMA_BOOTSTRAP: "false"
+      MAINTENANCE_ENABLED: "false"
+      UPLOAD_WORKER_MODE: external
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a production database password}
+      Token: ${MILVUS_APP_TOKEN:?Create a scoped Milvus user and set its token}
+    ports: !override
+      - "127.0.0.1:8000:8000"
+  worker:
+    environment:
+      NEXUSMIND_ENV: production
+      NEXUSMIND_SCHEMA_BOOTSTRAP: "false"
+      Token: ${MILVUS_APP_TOKEN:?Create a scoped Milvus user and set its token}

@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    inspect,
     delete,
     func,
     insert,
@@ -282,6 +283,17 @@ ALLOWED_CANDIDATE_TRANSITIONS = {
 }
 
 
+release_channels = Table(
+    "harness_release_channels", metadata,
+    Column("channel", String(160), primary_key=True),
+    Column("version", Integer, nullable=False),
+    Column("active_id", String(96)),
+    Column("previous_id", String(96)),
+    Column("canary_id", String(96)),
+    Column("policy_json", JSON, nullable=False, default=dict),
+)
+
+
 class HarnessStore:
     """Transactional registry for datasets, runs, scores, gates and promotions."""
 
@@ -296,7 +308,14 @@ class HarnessStore:
             pool_pre_ping=True,
             connect_args=connect_args,
         )
-        metadata.create_all(self.engine)
+        if os.getenv("NEXUSMIND_ENV") == "production" and os.getenv("NEXUSMIND_SCHEMA_BOOTSTRAP") != "true":
+            if self.database_url.startswith("sqlite"):
+                raise RuntimeError("production_harness_requires_postgresql")
+            missing = set(metadata.tables) - set(inspect(self.engine).get_table_names())
+            if missing:
+                raise RuntimeError("run_explicit_harness_migration_first")
+        else:
+            metadata.create_all(self.engine)
 
     @staticmethod
     def _default_database_url() -> str:
@@ -427,8 +446,9 @@ class HarnessStore:
         now = utc_now()
         with self.engine.begin() as conn:
             exists = conn.execute(
-                select(candidates.c.candidate_id).where(candidates.c.candidate_id == candidate.candidate_id)
-            ).first()
+                select(candidates).where(candidates.c.candidate_id == candidate.candidate_id)
+                .with_for_update()
+            ).mappings().first()
             values = {
                 "kind": candidate.kind,
                 "name": candidate.name,
@@ -438,6 +458,11 @@ class HarnessStore:
                 "updated_at": now,
             }
             if exists:
+                if (exists["content_hash"] != candidate.content_hash or
+                        exists["payload_json"] != candidate.payload or
+                        exists["kind"] != candidate.kind or exists["version"] != candidate.version or
+                        exists["name"] != candidate.name):
+                    raise ValueError("candidate_content_is_immutable")
                 # Registration updates immutable candidate content metadata but
                 # must never move a rejected/evaluated/active candidate back to
                 # an earlier state. State changes only happen through the
@@ -474,23 +499,31 @@ class HarnessStore:
         actor: str,
         reason: str,
         gate_decision_id: Optional[str] = None,
+        release_update: Optional[Dict[str, Any]] = None,
     ) -> None:
         current = self.get_candidate(candidate_id)
         if not current:
             raise KeyError(f"candidate not found: {candidate_id}")
         from_status = current["status"]
-        if from_status == to_status.value:
+        if from_status == to_status.value and release_update is None:
             return
         allowed = ALLOWED_CANDIDATE_TRANSITIONS.get(from_status, set())
-        if to_status.value not in allowed:
+        if from_status != to_status.value and to_status.value not in allowed:
             raise ValueError(
                 f"invalid candidate transition: {from_status} -> {to_status.value}"
             )
         with self.engine.begin() as conn:
-            conn.execute(update(candidates).where(candidates.c.candidate_id == candidate_id).values(
+            changed = conn.execute(update(candidates).where(
+                candidates.c.candidate_id == candidate_id,
+                candidates.c.status == from_status,
+            ).values(
                 status=to_status.value,
                 updated_at=utc_now(),
             ))
+            if changed.rowcount != 1:
+                raise RuntimeError("candidate_status_conflict")
+            if release_update is not None:
+                self._update_release(conn, release_update)
             conn.execute(insert(promotion_events).values(
                 event_id=new_id("promotion"),
                 candidate_id=candidate_id,
@@ -501,12 +534,42 @@ class HarnessStore:
                 reason=reason,
                 created_at=utc_now(),
             ))
-        self.audit("candidate", candidate_id, "status_changed", actor, {
-            "from": from_status,
-            "to": to_status.value,
-            "reason": reason,
-            "gate_decision_id": gate_decision_id,
-        })
+            conn.execute(insert(audit_events).values(
+                audit_id=new_id("audit"), entity_type="candidate", entity_id=candidate_id,
+                action="status_changed", actor=actor, created_at=utc_now(),
+                payload_json={"from": from_status, "to": to_status.value,
+                              "reason": reason, "gate_decision_id": gate_decision_id},
+            ))
+
+    def get_release_channel(self, channel: str = "global") -> Optional[Dict[str, Any]]:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(release_channels).where(release_channels.c.channel == channel)).mappings().first()
+            return dict(row) if row else None
+
+    def _update_release(self, conn, patch):
+        channel = patch.get("channel", "global")
+        row = conn.execute(select(release_channels).where(
+            release_channels.c.channel == channel).with_for_update()).mappings().first()
+        expected = patch.get("_expected_version")
+        if expected is not None and (row is None or row["version"] != expected):
+            raise RuntimeError("release_version_conflict")
+        values = {key: value for key, value in patch.items() if key not in {"channel", "_expected_version"}}
+        if row:
+            if "active_id" in values and values["active_id"] != row["active_id"]:
+                values.setdefault("previous_id", row["active_id"])
+            changed = conn.execute(update(release_channels).where(
+                release_channels.c.channel == channel,
+                release_channels.c.version == row["version"],
+            ).values(**values, version=row["version"] + 1))
+            if changed.rowcount != 1:
+                raise RuntimeError("release_version_conflict")
+        else:
+            if "active_id" not in values:
+                active = conn.execute(select(candidates.c.candidate_id).where(
+                    candidates.c.status == CandidateStatus.ACTIVE.value,
+                ).order_by(candidates.c.updated_at.desc()).limit(1)).scalar()
+                values["active_id"] = active
+            conn.execute(insert(release_channels).values(channel=channel, version=1, **values))
 
     def create_experiment(self, dataset_version_id: str, candidate_id: str) -> str:
         experiment_id = new_id("exp")

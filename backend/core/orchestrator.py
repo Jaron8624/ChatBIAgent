@@ -33,6 +33,7 @@ from tools.mcp_protocol import MCPToolServer, MCPToolRouter
 from evaluation.monitor import Monitor
 from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
 from core import collaboration
+from core.task_routing import describe_task, requires_loop
 from infra.tracing import Tracer, export_otel_trace
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class AgentState(TypedDict):
     intent: str
     intent_confidence: float
     query: str
+    task_plan: Dict[str, Any]
     rewritten_query: str
     rag_result: Optional[str]
     memory_result: Optional[str]
@@ -1638,6 +1640,9 @@ class Orchestrator:
         如"查一下最近三个月各品类销量，顺便看看表结构里有哪些字段，再帮我对比下去年同期"。
         只有数据查询诉求的复合查询仍走 ReAct（工具接力即可）。
         """
+        plan = describe_task(query)
+        if len(plan.steps) > 1 and plan.dependency == "independent":
+            return True
         data_cats = ["销量", "订单", "客户", "商品", "品类", "支付", "评价", "收入", "利润", "退款"]
         schema_cats = ["表结构", "字段", "schema", "怎么查", "SQL", "数据库", "表有哪些"]
         memory_cats = ["上次", "之前", "历史", "偏好", "常用", "以前"]
@@ -1656,13 +1661,7 @@ class Orchestrator:
         或包含"顺便/同时/还有/然后"等接力词。单一诉求走 Supervisor
         快速路径，避免不必要的迭代延迟。
         """
-        relay_words = ["顺便", "同时", "还有", "然后", "再帮", "另外", "一起"]
-        if any(w in query for w in relay_words):
-            return True
-        # 两个及以上数据分析关键词
-        biz_words = ["销量", "订单", "客户", "商品", "品类", "支付", "评价", "收入", "利润", "退款", "趋势", "对比"]
-        hits = sum(1 for w in biz_words if w in query)
-        return hits >= 2
+        return requires_loop(query)
 
     @staticmethod
     def _should_plan(query: str, intent: str) -> bool:
@@ -1860,6 +1859,7 @@ class Orchestrator:
             "intent": "",
             "intent_confidence": 0.0,
             "query": query,
+            "task_plan": describe_task(query).to_dict(),
             "rewritten_query": rewritten,
             "rag_result": None,
             "memory_result": None,

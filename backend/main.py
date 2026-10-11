@@ -10,6 +10,7 @@ import logging
 import asyncio
 from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
+from infra.scheduler import maintenance_leader
 from typing import Set
 from memory.auto_store_memory_from_psql import run_compression_task
 from infra.redis_cache import get_redis_client, close_redis_client, close_redis_binary_client
@@ -36,7 +37,9 @@ async def check_and_store_memory():
     )
     while True:
         try:
-            await run_compression_task(model=summarize_model)
+            async with maintenance_leader("memory-extraction") as leader:
+                if leader:
+                    await run_compression_task(model=summarize_model)
         except Exception as e:
             logger.error(f"记忆存储任务失败: {e}")
         await asyncio.sleep(180)
@@ -47,7 +50,8 @@ async def prune_graph_checkpoints():
     manager = get_graph_checkpointer_manager()
     while True:
         try:
-            removed = await manager.prune_expired()
+            async with maintenance_leader("checkpoint-retention") as leader:
+                removed = await manager.prune_expired() if leader else 0
             if removed:
                 logger.info("过期图检查点已清理: %s 个会话", removed)
         except Exception:
@@ -65,6 +69,20 @@ async def lifespan(app: FastAPI):
     # 初始化标志
     milvus_initialized = False
     postgresql_initialized = False
+    async def cleanup():
+        tasks = list(background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        closers = [close_redis_client(), close_redis_binary_client(), close_graph_checkpointer()]
+        if milvus_initialized:
+            closers.append(app.state.milvus_client.close())
+        if postgresql_initialized:
+            closers.append(app.state.postgresql_client.close())
+        results = await asyncio.gather(*closers, return_exceptions=True)
+        for error in results:
+            if isinstance(error, BaseException):
+                logger.error("资源清理失败，其他资源已继续清理: %s", type(error).__name__)
     
     try:    
         try:
@@ -88,10 +106,14 @@ async def lifespan(app: FastAPI):
         # ===== 新增：预热 Redis 连接 =====
         try:
             app.state.redis_client = await get_redis_client()
+            await app.state.redis_client.ping()
             logger.info("【Redis】 客户端初始化完成")
         except Exception as e:
             logger.error(f"Redis 客户端初始化失败: {e}")
-            raise
+            if os.getenv("REDIS_REQUIRED", "false").lower() == "true":
+                raise
+            app.state.redis_client = None
+            logger.warning("Redis 缓存不可用，会话继续使用持久化状态")
 
         checkpoint_setting = os.getenv("GRAPH_CHECKPOINT_ENABLED", "auto").strip().lower()
         checkpoint_key_present = bool(os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "").strip())
@@ -109,9 +131,10 @@ async def lifespan(app: FastAPI):
             )
         if checkpoint_enabled:
             await initialize_graph_checkpointer()
-            task = asyncio.create_task(prune_graph_checkpoints())
-            background_tasks.add(task)
-            task.add_done_callback(background_tasks.discard)
+            if os.getenv("MAINTENANCE_ENABLED", "true").lower() == "true":
+                task = asyncio.create_task(prune_graph_checkpoints())
+                background_tasks.add(task)
+                task.add_done_callback(background_tasks.discard)
             logger.info("【图执行恢复】PostgreSQL Checkpointer 已启用")
         else:
             logger.warning(
@@ -120,12 +143,22 @@ async def lifespan(app: FastAPI):
             )
 
         #所有连接成功后创建后台定时任务，每3分钟检查一次是否提取存在psql中的消息存为记忆
-        task = asyncio.create_task(check_and_store_memory())
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
+        worker_mode = os.getenv("UPLOAD_WORKER_MODE", "external" if os.getenv("NEXUSMIND_ENV") == "production" else "embedded")
+        if worker_mode == "embedded":
+            from rag.jobs import UploadWorker
+            from rag.documents_process import DocumentProcessor
+            from infra.hash_storage import HashStorage
+            task = asyncio.create_task(UploadWorker(app.state.postgresql_client, DocumentProcessor(HashStorage())).run())
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+        maintenance_enabled = os.getenv("MAINTENANCE_ENABLED", "true").lower() == "true"
+        if maintenance_enabled:
+            task = asyncio.create_task(check_and_store_memory())
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
 
         # ===== 新增：自进化自动触发闭环（BadCase → 规则抽取 → 自动决策） =====
-        if os.getenv("EVOLUTION_LOOP_ENABLED", "true").lower() in ("true", "1", "yes"):
+        if maintenance_enabled and os.getenv("EVOLUTION_LOOP_ENABLED", "true").lower() in ("true", "1", "yes"):
             evolution_task = asyncio.create_task(get_evolution_loop().run())
             background_tasks.add(evolution_task)
             evolution_task.add_done_callback(background_tasks.discard)
@@ -134,43 +167,15 @@ async def lifespan(app: FastAPI):
             logger.info("【自进化闭环】已通过 EVOLUTION_LOOP_ENABLED=false 关闭")
         
         
-    except Exception as e:
+    except BaseException as e:
         logger.error(f"初始化失败: {e}")
+        await cleanup()
         raise
     
-    yield  # 应用运行期间
-    
-    # 关闭时清理
-    logger.info("=" * 20 + "清理连接..." + "=" * 20)
-
-    
-    try:  
-        # 先停后台任务，避免清理期间仍有记忆提取或自进化任务访问连接池。
-        for task in list(background_tasks):
-            task.cancel()
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-
-        # 关闭 Milvus 连接
-        if milvus_initialized and app.state.milvus_client:
-            await app.state.milvus_client.close()
-            logger.info("✓ Milvus 连接已关闭")
-        
-        # 关闭 PostgreSQL 连接
-        if postgresql_initialized and app.state.postgresql_client:
-            await app.state.postgresql_client.close()
-            logger.info("✓ PostgreSQL 连接已关闭")
-
-        await close_redis_client()
-        await close_redis_binary_client()
-        logger.info("✓ Redis 连接已关闭")
-
-        await close_graph_checkpointer()
-        logger.info("✓ LangGraph 检查点连接已关闭")
-
-    except Exception as e:
-        logger.error(f"清理连接时出错: {e}")
-
+    try:
+        yield  # 应用运行期间
+    finally:
+        await cleanup()
     logger.info("应用已关闭")
 
 

@@ -151,7 +151,7 @@ class KnowledgeBaseManager:
         logger.info(f"集合 {self.collection_name} 创建成功")
 
     async def add_chunks_batch(
-        self, knowledge_base_id: str, chunks: List[Document], user_id: int
+        self, knowledge_base_id: str, chunks: List[Document], user_id: int, vectors=None
     ):
         """批量添加文档块到知识库"""
         if not chunks:
@@ -185,7 +185,9 @@ class KnowledgeBaseManager:
             )
 
         # 批量向量化
-        dense_vectors = await self.embeddings.aembed_documents(texts)
+        dense_vectors = vectors if vectors is not None else await self.embeddings.aembed_documents(texts)
+        if len(dense_vectors) != len(texts) or any(len(v) != self.dense_dim for v in dense_vectors):
+            raise ValueError("embedding_shape_mismatch")
 
         # 填充向量
         for i in range(len(data)):

@@ -43,8 +43,13 @@ async def get_milvus_client():
     global _global_milvus_client
     if _global_milvus_client is None:
         _global_milvus_client = AsyncMilvusClientWrapper()
-    await _global_milvus_client.ensure_collection()
-    return _global_milvus_client
+    instance = _global_milvus_client
+    try:
+        await instance.ensure_collection()
+    except BaseException:
+        await instance.close()
+        raise
+    return instance
 
 
 class AsyncMilvusClientWrapper:
@@ -108,6 +113,12 @@ class AsyncMilvusClientWrapper:
         async with self._collection_lock:
             if self._collection_initialized:
                 return
+            from infra.postgresql_client import get_postgresql_client
+            from rag.index_contract import bind_collection, index_configuration
+            pg = await get_postgresql_client()
+            for collection, kind in ((self.knowledge_base_collection, "knowledge"), (self.memory_collection, "memory")):
+                await bind_collection(pg, self.client, collection, index_configuration(self.dense_dim, kind),
+                    adopt_legacy=os.getenv("INDEX_ADOPT_LEGACY", "false").lower() == "true")
             await self._init_knowledge_base_collection()
             await self._init_memory_collection()
             self._collection_initialized = True
@@ -125,6 +136,13 @@ class AsyncMilvusClientWrapper:
         if self.client:
             await self.client.close()
             logger.info("Milvus 客户端已关闭")
+        global _global_milvus_client
+        if _global_milvus_client is self:
+            _global_milvus_client = None
+        if type(self)._instance is self:
+            type(self)._instance = None
+        self._singleton_initialized = False
+        self._collection_initialized = False
 
     # ==================== 记忆管理方法代理 ====================
     async def hybrid_retrieval_memories(
@@ -193,12 +211,15 @@ class AsyncMilvusClientWrapper:
         )
 
     async def add_chunks_batch(
-        self, knowledge_base_id: str, chunks, user_id: int
+        self, knowledge_base_id: str, chunks, user_id: int, vectors=None
     ) -> bool:
         """批量添加知识块 - 代理到 knowledge_base_manager"""
         return await self.knowledge_base_manager.add_chunks_batch(
-            knowledge_base_id, chunks, user_id
+            knowledge_base_id, chunks, user_id, vectors=vectors
         )
+
+    async def prepare_chunks(self, chunks):
+        return await self.embeddings.aembed_documents([chunk.page_content for chunk in chunks])
 
     async def delete_knowledge_file_chunks(
         self, knowledge_base_id: str, user_id: int

@@ -93,7 +93,7 @@ def checkpoint_thread_id(session_id: str, user_id: int, tenant_id: str) -> str:
     """Return a stable, opaque ID bound to the authenticated session owner."""
     if not session_id or user_id <= 0:
         raise ValueError("图执行持久化需要已登录用户和有效会话")
-    key = os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "").strip()
+    key = (os.getenv("GRAPH_CHECKPOINT_IDENTITY_KEY") or os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "")).strip()
     if not key:
         raise RuntimeError("GRAPH_CHECKPOINT_FERNET_KEY 未配置")
     try:
@@ -134,7 +134,7 @@ class GraphCheckpointerManager:
             raise RuntimeError("GRAPH_CHECKPOINT_FERNET_KEY 未配置，拒绝保存明文图状态")
 
         try:
-            from cryptography.fernet import Fernet
+            from cryptography.fernet import Fernet, MultiFernet
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
             from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
             from psycopg.rows import dict_row
@@ -144,7 +144,10 @@ class GraphCheckpointerManager:
                 "图执行持久化依赖未安装，请安装 langgraph-checkpoint-postgres"
             ) from exc
 
-        cipher = Fernet(key.encode("ascii"))
+        previous_keys = [value.strip() for value in os.getenv("GRAPH_CHECKPOINT_PREVIOUS_KEYS", "").split(",") if value.strip()]
+        if previous_keys and not os.getenv("GRAPH_CHECKPOINT_IDENTITY_KEY"):
+            raise RuntimeError("rotation_requires_stable_checkpoint_identity_key")
+        cipher = MultiFernet([Fernet(value.encode("ascii")) for value in [key, *previous_keys]])
 
         class EncryptedCheckpointSerializer(JsonPlusSerializer):
             """Encrypt serialized checkpoint blobs and reject plaintext blob rows."""
@@ -209,16 +212,26 @@ class GraphCheckpointerManager:
             saver = EncryptedAsyncPostgresSaver(
                 pool, serde=EncryptedCheckpointSerializer()
             )
-            await saver.setup()
+            production = os.getenv("NEXUSMIND_ENV") == "production" and os.getenv("NEXUSMIND_SCHEMA_BOOTSTRAP") != "true"
+            if not production:
+                await saver.setup()
             async with pool.connection() as conn:
-                await conn.execute(
+                if production:
+                    cursor = await conn.execute("""SELECT to_regclass('checkpoints') IS NOT NULL
+                        AND to_regclass('checkpoint_blobs') IS NOT NULL
+                        AND to_regclass('checkpoint_writes') IS NOT NULL
+                        AND to_regclass('nexusmind_checkpoint_threads') IS NOT NULL AS ready""")
+                    if not (await cursor.fetchone())["ready"]:
+                        raise RuntimeError("run_explicit_checkpoint_migration_first")
+                else:
+                    await conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS nexusmind_checkpoint_threads (
                         thread_id TEXT PRIMARY KEY,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
-                )
+                    )
             self.pool = pool
             self.saver = saver
             logger.info("LangGraph PostgreSQL 检查点已初始化")

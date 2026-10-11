@@ -60,8 +60,8 @@ services:
     volumes:
       - ./docker-data/milvus:/var/lib/milvus
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
     depends_on:
       etcd:
         condition: service_healthy
@@ -86,7 +86,7 @@ services:
     volumes:
       - ./docker-data/postgres:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexusmind}"]
       interval: 10s
@@ -101,7 +101,7 @@ services:
     volumes:
       - ./docker-data/redis:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -123,6 +123,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
       HARNESS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
       REDIS_URL: redis://redis:6379/0
+      UPLOAD_WORKER_MODE: external
+      MAINTENANCE_ENABLED: "false"
+      UPLOAD_STORAGE_ROOT: /app/data/uploads
+    volumes:
+      - nexusmind_uploads:/app/data/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -130,6 +135,31 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      redis:
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    command: ["python", "-m", "rag.upload_worker"]
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+      Milvus_url: http://milvus:19530
+      Token: root:Milvus
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
+      HARNESS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
+      REDIS_URL: redis://redis:6379/0
+      MAINTENANCE_ENABLED: "true"
+      UPLOAD_STORAGE_ROOT: /app/data/uploads
+    volumes:
+      - nexusmind_uploads:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  nexusmind_uploads:

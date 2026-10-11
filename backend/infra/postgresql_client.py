@@ -138,7 +138,7 @@ class PostgreSQLParentClient:
                 return
 
             try:
-                if self.auto_create_db:
+                if self.auto_create_db and os.getenv("NEXUSMIND_ENV") != "production":
                     await ensure_database_exists(self.dsn)
 
                 self.pool = await asyncpg.create_pool(
@@ -152,6 +152,15 @@ class PostgreSQLParentClient:
                 )
 
                 async with self.pool.acquire() as conn:
+                    if (os.getenv("NEXUSMIND_ENV") == "production"
+                            and os.getenv("NEXUSMIND_SCHEMA_BOOTSTRAP") != "true"):
+                        if not await conn.fetchval("SELECT to_regclass('nexusmind_schema_versions')"):
+                            raise RuntimeError("run_explicit_database_migration_first")
+                        version = await conn.fetchval("SELECT max(version) FROM nexusmind_schema_versions")
+                        if version != 2:
+                            raise RuntimeError("database_schema_version_mismatch")
+                        self._pool_initialized = True
+                        return
                     await conn.execute(
                         """
                         -- 1. 用户表
@@ -271,18 +280,31 @@ class PostgreSQLParentClient:
 
                     from rag.knowledge_consistency import DDL
                     await conn.execute(DDL)
+                    from rag.jobs import DDL as JOB_DDL
+                    await conn.execute(JOB_DDL)
+                    from rag.index_contract import DDL as INDEX_DDL
+                    await conn.execute(INDEX_DDL)
+                    await conn.execute("""CREATE TABLE IF NOT EXISTS nexusmind_schema_versions (
+                        version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+                        INSERT INTO nexusmind_schema_versions(version) VALUES(2) ON CONFLICT DO NOTHING;""")
 
                 self._pool_initialized = True
                 logger.info("PostgreSQL client initialized successfully")
 
             except Exception as e:
                 logger.error(f"Failed to initialize PostgreSQL client: {e}")
+                if self.pool is not None:
+                    await self.pool.close()
+                    self.pool = None
+                self._pool_initialized = False
                 raise
 
     async def close(self):
         """关闭连接池"""
         if self.pool:
             await self.pool.close()
+            self.pool = None
+            self._pool_initialized = False
             logger.info("PostgreSQL connection pool closed")
 
     # ============ 知识库管理 ============

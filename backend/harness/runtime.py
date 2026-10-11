@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from contextlib import contextmanager
+import hashlib
+from contextlib import contextmanager, asynccontextmanager
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Iterator, Optional
 
@@ -46,6 +47,20 @@ class HarnessRuntime:
     def select(self, tenant_id: str, user_id: Any) -> RuntimeRelease:
         tenant = str(tenant_id or "default")
         user = str(user_id or "")
+        channel = self.store.get_release_channel(tenant) or self.store.get_release_channel()
+        if channel is not None:
+            policy = channel.get("policy_json") or {}
+            canary = self.store.get_candidate(channel.get("canary_id", ""))
+            allowlist = policy.get("tenant_ids") or []
+            bucket = int(hashlib.sha256(f"{channel.get('canary_id')}:{tenant}:{user}".encode()).hexdigest()[:8], 16) % 10000 / 100
+            if (canary and canary["status"] == CandidateStatus.SHADOW.value
+                    and (not allowlist or tenant in allowlist)
+                    and bucket < float(policy.get("traffic_percent", 0))):
+                return RuntimeRelease(tenant, user, canary["candidate_id"], "canary", True, "versioned canary bucket")
+            active = self.store.get_candidate(channel.get("active_id", ""))
+            if active and active["status"] == CandidateStatus.ACTIVE.value:
+                return RuntimeRelease(tenant, user, active["candidate_id"], "active", True, "versioned active pointer")
+            return RuntimeRelease(tenant_id=tenant, user_id=user)
         candidates = self.store.list_candidates()
 
         active = [
@@ -103,6 +118,20 @@ class HarnessRuntime:
         release = self.select(tenant_id, user_id)
         candidate = self.store.get_candidate(release.candidate_id) if release.selected else None
         skill = self._candidate_skill(candidate or {})
+        with self.skills_manager.candidate_overlay([skill] if skill else []):
+            yield release
+
+    @asynccontextmanager
+    async def async_request_scope(self, tenant_id, user_id):
+        from infra.async_io import run_blocking
+        def load():
+            release = self.select(tenant_id, user_id)
+            candidate = self.store.get_candidate(release.candidate_id) if release.selected else None
+            return release, candidate
+        release, candidate = await run_blocking(load)
+        skill = self._candidate_skill(candidate or {})
+        # The ContextVar overlay belongs to the request coroutine, not to the
+        # SQL worker thread. Never enter the overlay inside run_blocking.
         with self.skills_manager.candidate_overlay([skill] if skill else []):
             yield release
 

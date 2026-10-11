@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 # 拷贝业务代码
 COPY backend/ ./backend/
+COPY scripts/ ./scripts/
 COPY cli.py ./
 # 拷贝数据文件（ChatBI 电商数据库）
 COPY data/ ./data/

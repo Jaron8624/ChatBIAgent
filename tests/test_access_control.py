@@ -43,6 +43,19 @@ class AccessControlIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(identity["user_id"], 7)
         self.assertEqual(identity["role"], UserRole.ADMIN)
 
+    async def test_production_cannot_enable_demo_header_authentication(self):
+        request = FakeRequest({"X-User-Id": "7", "X-User-Role": "admin"})
+        with patch.dict(os.environ, {"NEXUSMIND_ENV": "production", "NEXUSMIND_ALLOW_HEADER_IDENTITY": "true"}):
+            with self.assertRaises(HTTPException) as raised:
+                get_request_identity(request)
+        self.assertEqual(raised.exception.status_code, 401)
+
+    async def test_production_rejects_zero_or_boolean_principal_id(self):
+        for value in (0, False, True):
+            with self.subTest(value=value), patch.dict(os.environ, {"NEXUSMIND_ENV": "production"}):
+                with self.assertRaises(HTTPException):
+                    get_request_identity(FakeRequest(user={"user_id": value, "role": "admin"}))
+
 
 if __name__ == "__main__":
     unittest.main()

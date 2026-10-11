@@ -274,6 +274,8 @@ def get_request_identity(request: Request) -> Dict[str, Any]:
     """
     principal = getattr(request.state, "user", None)
     if principal is None:
+        if os.getenv("NEXUSMIND_ENV", "development").strip().lower() == "production":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="生产环境需要可信身份认证")
         scope_user = request.scope.get("user") if hasattr(request, "scope") else None
         if scope_user is not None and getattr(scope_user, "is_authenticated", False):
             principal = scope_user
@@ -297,8 +299,12 @@ def get_request_identity(request: Request) -> Dict[str, Any]:
         tenant_id = getattr(principal, "tenant_id", "default")
 
     try:
+        if isinstance(raw_user_id, bool):
+            raise ValueError
         user_id = int(raw_user_id)
         if user_id < 0:
+            raise ValueError
+        if os.getenv("NEXUSMIND_ENV", "development").strip().lower() == "production" and user_id == 0:
             raise ValueError
     except (TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的用户身份")

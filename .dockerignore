@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+.venv*
+node_modules
+frontend/node_modules
+artifacts
+docker-data
+data/uploads
+data/*.db
+data/*.jsonl
+**/__pycache__
+**/*.pyc
+**/temp
+**/.pytest_cache

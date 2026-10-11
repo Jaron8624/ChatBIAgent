@@ -68,10 +68,13 @@ class DocumentProcessor:
 
     async def process_document(
         self, temp_file_path: Path, filename: str, file_hash: str,
-        knowledge_base_id: str, user_id: int,
+        knowledge_base_id: str, user_id: int, expected_generation=None, publish_guard=None,
     ) -> List[Dict]:
         try:
-            return await self._process_document(temp_file_path, filename, file_hash, knowledge_base_id, user_id)
+            options = {"expected_generation": expected_generation} if expected_generation is not None else {}
+            if publish_guard is not None:
+                options["publish_guard"] = publish_guard
+            return await self._process_document(temp_file_path, filename, file_hash, knowledge_base_id, user_id, **options)
         finally:
             # Includes parser failure, cancellation and duplicate uploads.
             await TempDocumentProcessor().delete_temp_file(temp_file_path)
@@ -83,6 +86,8 @@ class DocumentProcessor:
         file_hash: str,
         knowledge_base_id: str,
         user_id: int,
+        expected_generation=None,
+        publish_guard=None,
     ) -> List[Dict]:
         # 解码 URL 编码的文件名
         filename = unquote(filename)
@@ -191,7 +196,9 @@ class DocumentProcessor:
         postgresql_client = await get_postgresql_client()
         published = await KnowledgeOperations(postgresql_client, milvus_client).upload(
             knowledge_base_id, user_id, file_hash, filename,
-            parent_data_list, new_child_items, new_hashes)
+            parent_data_list, new_child_items, new_hashes,
+            **({"expected_generation": expected_generation} if expected_generation is not None else {}),
+            **({"publish_guard": publish_guard} if publish_guard is not None else {}))
         
         if new_hashes:
             logger.info(f"==========批量添加 {len(new_hashes)} 个新哈希==========")
