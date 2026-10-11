@@ -36,7 +36,8 @@ def main():
     checks.append({"check": "undefined_names", "passed": result.returncode == 0,
         "details": result.stdout + result.stderr})
     files = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
-    files.extend(["tests/test_module_bugfixes.py", "scripts/verify_module_regressions.py"])
+    files.extend(path.relative_to(ROOT).as_posix() for directory in ("backend", "scripts", "tests")
+        for path in (ROOT / directory).rglob("*.py") if "temp" not in path.parts)
     hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
         for name in sorted(set(files)) if name.endswith(".py") and (ROOT / name).is_file()}
     report = {"run_id": run_id, "status": "passed" if all(c["passed"] for c in checks) else "failed",

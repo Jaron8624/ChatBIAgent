@@ -49,15 +49,16 @@ async def ensure_database_exists(dsn: str) -> None:
         )
         await conn.close()
         logger.info(f"Database '{db_name}' already exists")
-    except Exception as e:
-        logger.error(f"Error occurred while checking database: {e}")
+    except asyncpg.InvalidCatalogNameError:
         logger.info(f"Database '{db_name}' does not exist. Creating...")
 
         conn = await asyncpg.connect(
             user=user, password=password, host=host, port=port, database="postgres"
         )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        try:
+            await conn.execute('CREATE DATABASE "' + db_name.replace('"', '""') + '"')
+        finally:
+            await conn.close()
         logger.info(f"Created database: {db_name}")
 
 
@@ -69,7 +70,9 @@ async def get_postgresql_client():
     global _global_postgresql_client
     if _global_postgresql_client is None:
         _global_postgresql_client = PostgreSQLParentClient()
-        await _global_postgresql_client.init_pool()
+    # Every caller waits for initialization; publishing an object before the
+    # first await must not allow another request to use an unready pool.
+    await _global_postgresql_client.init_pool()
     return _global_postgresql_client
 
 
@@ -265,6 +268,9 @@ class PostgreSQLParentClient:
                         CREATE INDEX IF NOT EXISTS idx_kb_user ON knowledge_bases(user_id);-- 加速查询：查询某用户的所有知识库
                     """
                     )
+
+                    from rag.knowledge_consistency import DDL
+                    await conn.execute(DDL)
 
                 self._pool_initialized = True
                 logger.info("PostgreSQL client initialized successfully")
@@ -470,6 +476,7 @@ class PostgreSQLParentClient:
                     """
                     SELECT 1 FROM file_metadata 
                     WHERE file_hash = $1 AND knowledge_base_id = $2 AND user_id = $3
+                    AND ingestion_state = 'complete'
                     LIMIT 1
                 """,
                     file_hash,
@@ -482,7 +489,8 @@ class PostgreSQLParentClient:
             raise
 
     async def add_file_metadata(
-        self, file_hash: str, file_name: str, knowledge_base_id: str, user_id: int
+        self, file_hash: str, file_name: str, knowledge_base_id: str, user_id: int,
+        ingestion_state: str = "complete",
     ):
         """添加文件元数据"""
         if not self.pool:
@@ -514,15 +522,16 @@ class PostgreSQLParentClient:
                     # 3. 最后添加文件元数据
                     await conn.execute(
                         """
-                        INSERT INTO file_metadata (file_hash, file_name, knowledge_base_id, user_id)
-                        VALUES ($1, $2, $3, $4)
+                        INSERT INTO file_metadata (file_hash, file_name, knowledge_base_id, user_id, ingestion_state)
+                        VALUES ($1, $2, $3, $4, $5)
                         ON CONFLICT (file_hash, knowledge_base_id, user_id) DO UPDATE 
-                        SET file_name = EXCLUDED.file_name
+                        SET file_name = EXCLUDED.file_name, ingestion_state = EXCLUDED.ingestion_state
                     """,
                         file_hash,
                         file_name,
                         knowledge_base_id,
                         user_id,
+                        ingestion_state,
                     )
 
                     logger.info(
@@ -630,6 +639,7 @@ class PostgreSQLParentClient:
                     SELECT file_hash, file_name, uploaded_at
                     FROM file_metadata
                     WHERE knowledge_base_id = $1 AND user_id = $2
+                    AND ingestion_state = 'complete'
                     ORDER BY uploaded_at DESC
                 """,
                     knowledge_base_id,
@@ -710,10 +720,10 @@ class PostgreSQLParentClient:
                 if knowledge_base_id == "默认知识库":
                     rows = await conn.fetch(
                         """
-                    SELECT text
-                    FROM parent_chunks
-                    WHERE parent_id = ANY($1::text[]) 
-                    AND user_id = $2
+                    SELECT p.text FROM parent_chunks p JOIN file_metadata f
+                    ON (p.file_hash,p.knowledge_base_id,p.user_id)=(f.file_hash,f.knowledge_base_id,f.user_id)
+                    WHERE p.parent_id = ANY($1::text[]) AND p.user_id = $2
+                    AND f.ingestion_state = 'complete' AND left(p.knowledge_base_id,13) <> '__rag_tenant_'
                 """,
                         parent_ids,
                         user_id,
@@ -721,11 +731,10 @@ class PostgreSQLParentClient:
                 else:
                     rows = await conn.fetch(
                         """
-                    SELECT text
-                    FROM parent_chunks
-                    WHERE parent_id = ANY($1::text[]) 
-                    AND knowledge_base_id = $2 
-                    AND user_id = $3
+                    SELECT p.text FROM parent_chunks p JOIN file_metadata f
+                    ON (p.file_hash,p.knowledge_base_id,p.user_id)=(f.file_hash,f.knowledge_base_id,f.user_id)
+                    WHERE p.parent_id = ANY($1::text[]) AND p.knowledge_base_id = $2
+                    AND p.user_id = $3 AND f.ingestion_state = 'complete'
                 """,
                         parent_ids,
                         knowledge_base_id,

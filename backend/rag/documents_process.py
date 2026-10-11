@@ -17,6 +17,7 @@ import uuid
 import hashlib
 import logging
 from infra.postgresql_client import get_postgresql_client
+from rag.knowledge_consistency import KnowledgeOperations
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,16 @@ class DocumentProcessor:
         return self._milvus_client
 
     async def process_document(
+        self, temp_file_path: Path, filename: str, file_hash: str,
+        knowledge_base_id: str, user_id: int,
+    ) -> List[Dict]:
+        try:
+            return await self._process_document(temp_file_path, filename, file_hash, knowledge_base_id, user_id)
+        finally:
+            # Includes parser failure, cancellation and duplicate uploads.
+            await TempDocumentProcessor().delete_temp_file(temp_file_path)
+
+    async def _process_document(
         self,
         temp_file_path: Path,
         filename: str,
@@ -79,7 +90,6 @@ class DocumentProcessor:
 
         loader_mapping = {
             ".pdf": PyMuPDFLoader,
-            ".doc": Docx2txtLoader,
             ".docx": Docx2txtLoader,
         }
 
@@ -159,19 +169,9 @@ class DocumentProcessor:
             raise ValueError(f"文件 {filename} 未解析出有效文本，不能标记为上传成功")
 
         # ========== 1. 先添加文件元数据（必须在所有外键引用之前） ==========
-        await self.hash_storage.add_file_hash(
-            file_hash, filename, knowledge_base_id, user_id
-        )
-        logger.info(f"==========添加文件元数据完成==========")
-
-        # ========== 2. 批量检查所有哈希（排除当前文件的已有块哈希） ==========
-        all_hashes = [
-            hashlib.sha256(chunk.page_content.encode()).hexdigest()
-            for chunk in all_child_items
-        ]
-        existing_hashes = await self.hash_storage.batch_check_duplicates(
-            all_hashes, file_hash, knowledge_base_id, user_id
-        )
+        # Identical content in another file still needs its own ownership.
+        # Otherwise deleting that file silently removes this file's evidence.
+        existing_hashes = set()
 
         # ========== 3. 过滤出新子块（未被其他文件使用过的） ==========
         new_child_items = []
@@ -187,38 +187,11 @@ class DocumentProcessor:
             new_hashes.append(child_hash)
             existing_hashes.add(child_hash)
 
-        # ========== 4-6. 并行执行独立的数据库操作 ==========
-        # 注意：批量添加新哈希依赖文件元数据（已存在），可以与 Milvus 和 PostgreSQL 并行
-        tasks = []
-        
-        # 任务1：批量添加新哈希（如果有）
-        if new_hashes:
-            tasks.append(
-                self.hash_storage.batch_add_chunk_hashes(
-                    new_hashes, file_hash, knowledge_base_id, user_id
-                )
-            )
-        
-        # 任务2：批量插入 Milvus 数据库（只插入新子块）
-        if new_child_items:
-            milvus_client = await self._get_milvus_client()
-            tasks.append(
-                milvus_client.add_chunks_batch(
-                    knowledge_base_id=knowledge_base_id,
-                    chunks=new_child_items,
-                    user_id=user_id,
-                )
-            )
-        
-        # 任务3：批量插入 PostgreSQL 数据库（父块）
+        milvus_client = await self._get_milvus_client()
         postgresql_client = await get_postgresql_client()
-        tasks.append(
-            postgresql_client.add_parent_chunk_batch(parent_data_list, user_id)
-        )
-        
-        # 并行执行所有数据库操作
-        if tasks:
-            await asyncio.gather(*tasks)
+        published = await KnowledgeOperations(postgresql_client, milvus_client).upload(
+            knowledge_base_id, user_id, file_hash, filename,
+            parent_data_list, new_child_items, new_hashes)
         
         if new_hashes:
             logger.info(f"==========批量添加 {len(new_hashes)} 个新哈希==========")
@@ -229,8 +202,6 @@ class DocumentProcessor:
         logger.info(f"==========批量插入 {len(parent_data_list)} 个父块到postgresql完成==========")
 
         # 清理临时文件
-        tempProcessor = TempDocumentProcessor()
-        await tempProcessor.delete_temp_file(temp_file_path)
 
         return [
             {
@@ -238,6 +209,7 @@ class DocumentProcessor:
                 "parent_chunks": len(parent_data_list),
                 "child_chunks": len(all_child_items),
                 "new_chunks": len(new_child_items),
+                "is_duplicate": not published,
             }
         ]
 

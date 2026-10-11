@@ -43,7 +43,7 @@ async def get_milvus_client():
     global _global_milvus_client
     if _global_milvus_client is None:
         _global_milvus_client = AsyncMilvusClientWrapper()
-        await _global_milvus_client.ensure_collection()
+    await _global_milvus_client.ensure_collection()
     return _global_milvus_client
 
 

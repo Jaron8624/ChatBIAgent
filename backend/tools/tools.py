@@ -141,19 +141,39 @@ async def search_knowledge_base(
     # 从强类型 context 获取参数
     user_id = runtime.context.user_id
     knowledge_base_id = runtime.context.knowledge_base_id
+    from rag.knowledge_consistency import namespace_id, visible_names
+    postgresql_client = await get_postgresql_client()
+    tenant = runtime.context.tenant_id
+    if knowledge_base_id == "默认知识库" and tenant != "default":
+        names = await visible_names(postgresql_client, user_id, tenant)
+        if not names:
+            return "未检索到相关文档"
+        # Each actual retrieval is explicitly scoped; never fall back to a
+        # user-only aggregate for a non-default tenant.
+        storage_ids = [storage for _, storage in names]
+    else:
+        storage_ids = [await namespace_id(postgresql_client, knowledge_base_id, user_id, tenant)]
     top_k = runtime.context.top_k
 
     print(f"当前用户ID: {user_id}\n查询问题: {query}")
-    writer = get_stream_writer()
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        writer = lambda _: None
     writer(f"🔍 正在检索知识库【{knowledge_base_id}】...")
     logger.info(f"{'---'*20}开始混合检索hybrid_retrieval_knowledge_base{'---'*20}")
     start_time = time.time()
 
     # 使用全局 Milvus 客户端
     milvus_client = await get_milvus_client()
-    parent_chunkId_list = await milvus_client.hybrid_retrieval_knowledge_base(
-        query=query, knowledge_base_id=knowledge_base_id, top_k=top_k, user_id=user_id
-    )
+    parent_documents = []
+    parent_chunkId_list = []
+    for storage_id in storage_ids:
+        ids = await milvus_client.hybrid_retrieval_knowledge_base(
+            query=query, knowledge_base_id=storage_id, top_k=top_k, user_id=user_id)
+        parent_chunkId_list.extend(ids)
+        parent_documents.extend(await postgresql_client.get_parents(
+            parent_ids=ids, knowledge_base_id=storage_id, user_id=user_id))
 
     logger.info(
         f"{'---'*20}开始从PostgreSQL获取父块get_parents，一共需要检索出{len(parent_chunkId_list)}个父块{'---'*20}"
@@ -165,13 +185,8 @@ async def search_knowledge_base(
         return "未检索到相关文档"
 
     # 使用全局 PostgreSQL 客户端
-    postgresql_client = await get_postgresql_client()
-    # 或取父块文本列表
-    parent_documents = await postgresql_client.get_parents(
-        knowledge_base_id=knowledge_base_id,
-        parent_ids=parent_chunkId_list,
-        user_id=user_id,
-    )
+    if not parent_documents:
+        return "未检索到已完成入库的相关文档"
 
     # 重排序父块
     logger.info(f"{'---'*20}开始重排序父块rerank_documents{'---'*20}")

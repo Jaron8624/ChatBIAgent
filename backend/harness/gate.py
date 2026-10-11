@@ -13,6 +13,20 @@ class GateEngine:
 
     def __init__(self, policy: GatePolicy | None = None):
         self.policy = policy or GatePolicy()
+        for name in ("max_quality_drop", "require_protected_pass_rate", "require_safety_pass_rate",
+                     "max_latency_ratio", "max_cost_ratio", "require_holdout_pass_rate"):
+            value = getattr(self.policy, name)
+            if value is None and name == "require_holdout_pass_rate":
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"Invalid gate policy: {name}")
+            if ("pass_rate" in name or name == "max_quality_drop") and value > 1:
+                raise ValueError(f"Invalid gate probability: {name}")
+        for suite, rate in self.policy.required_suite_pass_rates.items():
+            if not suite or isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or not 0 <= rate <= 1:
+                raise ValueError("Invalid required suite threshold")
+        if isinstance(self.policy.min_cases, bool) or not isinstance(self.policy.min_cases, int) or self.policy.min_cases < 1:
+            raise ValueError("min_cases must be a positive integer")
 
     def decide(
         self,
@@ -34,6 +48,20 @@ class GateEngine:
                 value = summary.get(field)
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     reasons.append(f"{role} invalid or missing {field}")
+            if "holdout_case_count" in summary:
+                count = summary["holdout_case_count"]
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    reasons.append(f"{role} invalid holdout_case_count")
+            if "suite_counts" in summary:
+                counts = summary["suite_counts"]
+                if not isinstance(counts, dict):
+                    reasons.append(f"{role} suite_counts must be an object")
+                else:
+                    for suite, count in counts.items():
+                        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                            reasons.append(f"{role} invalid suite count {suite}")
+                        elif suite in self.policy.required_suite_pass_rates and count == 0:
+                            reasons.append(f"{role} required suite has zero samples: {suite}")
             groups = [("summary", {key: summary[key] for key in
                 ("case_pass_rate", "protected_pass_rate", "holdout_pass_rate", "p95_latency_ms", "avg_cost")
                 if summary.get(key) is not None})]

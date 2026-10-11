@@ -196,10 +196,12 @@ class DocumentIngestionTests(unittest.IsolatedAsyncioTestCase):
         pg = SimpleNamespace(add_parent_chunk_batch=AsyncMock())
         with patch("rag.documents_process.Docx2txtLoader", return_value=loader), \
              patch("rag.documents_process.get_postgresql_client", AsyncMock(return_value=pg)), \
+             patch("rag.documents_process.KnowledgeOperations") as operations, \
              patch("rag.documents_process.TempDocumentProcessor.delete_temp_file", AsyncMock()):
+            operations.return_value.upload = AsyncMock(return_value=True)
             result = await processor.process_document(Path("unused.docx"), "same.docx", "hash", "kb", 7)
         self.assertEqual(result[0]["new_chunks"], 1)
-        self.assertEqual(len(milvus.add_chunks_batch.call_args.kwargs["chunks"]), 1)
+        self.assertEqual(len(operations.return_value.upload.call_args.args[5]), 1)
 
 
 class FieldEvaluationFailureTests(unittest.TestCase):

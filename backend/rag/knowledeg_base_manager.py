@@ -143,6 +143,7 @@ class KnowledgeBaseManager:
             schema=schema,
             index_params=index_params,
             properties={"partitionkey.isolation": True},
+            consistency_level="Strong",
         )
         # 创建集合后，加载集合
         await self.client.load_collection(self.collection_name)
@@ -230,7 +231,9 @@ class KnowledgeBaseManager:
         # 构建过滤表达式
         scoped = _scope_filter(knowledge_base_id, user_id)
         if knowledge_base_id == "默认知识库":
-            filter_expr = f"user_id == {user_id}"
+            # Legacy/default tenants may search their own legacy KBs, never
+            # another tenant's registry-backed namespaces with the same user ID.
+            filter_expr = f'user_id == {user_id} and not (knowledge_base_id like "__rag_tenant_%")'
         else:
             filter_expr = scoped
         
@@ -247,6 +250,7 @@ class KnowledgeBaseManager:
             try:
                 results = await self.client.search(
                     collection_name=self.collection_name,
+                    consistency_level="Strong",
                     data=[query],
                     anns_field="sparse_bm25",
                     search_params={"metric_type": "BM25"},
@@ -286,6 +290,7 @@ class KnowledgeBaseManager:
         try:
             results = await self.client.hybrid_search(
                 collection_name=self.collection_name,
+                consistency_level="Strong",
                 reqs=[dense_req, sparse_req],
                 ranker=RRFRanker(),
                 limit=top_k * 3,
@@ -298,6 +303,7 @@ class KnowledgeBaseManager:
 
             results = await self.client.search(
                 collection_name=self.collection_name,
+                consistency_level="Strong",
                 data=[dense_vector],
                 anns_field="dense_vector",
                 search_params={"metric_type": "COSINE", "params": {"ef": 64}},

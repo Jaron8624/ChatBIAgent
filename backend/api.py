@@ -47,6 +47,7 @@ from memory.session_recovery import get_session_manager
 from tools.mcp_protocol import MCPServerPool, create_mcp_pool_from_env
 from harness.runtime import get_harness_runtime
 from infra.llm_usage import UsageTracker
+from rag.knowledge_consistency import KnowledgeOperations, namespace_id, visible_names, bound_client
 
 # 配置日志
 logging.basicConfig(
@@ -147,13 +148,19 @@ async def file_upload(
 
     async with upload_semaphore:
         try:
-            filename = file.filename
+            from pathlib import PureWindowsPath
+            filename = PureWindowsPath(file.filename or "").name
+            if not filename or "\x00" in filename:
+                raise HTTPException(status_code=400, detail="无效的文件名")
+            pg = request.app.state.postgresql_client
+            storage_id = await namespace_id(pg, knowledge_base_id, user_id,
+                user_info.get("tenant_id", "default"), create=True)
             logger.info(f"文件名: {filename}")
             file_lower = filename.lower()
 
             # 文件类型验证
-            if not file_lower.endswith((".pdf", ".docx", ".doc")):
-                raise HTTPException(status_code=400, detail="仅支持PDF和Word文档")
+            if not file_lower.endswith((".pdf", ".docx")):
+                raise HTTPException(status_code=400, detail="仅支持 PDF 与 DOCX，请将旧版 DOC 转换为 DOCX")
 
             # 修复：检查文件大小，处理 file.size 为 None 的情况
             if file.size is not None and file.size > MAX_FILE_SIZE:
@@ -170,7 +177,7 @@ async def file_upload(
             sha256 = hashlib.sha256()
             temp_processor = TempDocumentProcessor()
 
-            temp_file_path = temp_processor.temp_dir / f"{uuid.uuid4()}_{filename}"
+            temp_file_path = temp_processor.temp_dir / (uuid.uuid4().hex + (".pdf" if file_lower.endswith(".pdf") else ".docx"))
 
             # 流式计算哈希，写入文件
             try:
@@ -224,8 +231,11 @@ async def file_upload(
                 raise HTTPException(status_code=400, detail="客户端已断开连接")
 
             # 异步调用检查文件是否重复（传入 user_id）
+            if total_size == 0:
+                await temp_processor.delete_temp_file(temp_file_path)
+                raise HTTPException(status_code=400, detail="不能上传空文件")
             if await hash_storage.is_file_duplicate(
-                file_hash, knowledge_base_id, user_id
+                file_hash, storage_id, user_id
             ):
                 logger.info(f"文件已存在，跳过处理: {filename}")
                 if temp_file_path and temp_file_path.exists():
@@ -257,8 +267,8 @@ async def file_upload(
                 temp_file_path=temp_file_path,
                 filename=filename,
                 file_hash=file_hash,
-                knowledge_base_id=knowledge_base_id,
-                user_id=user_id,  # 新增
+                knowledge_base_id=storage_id,
+                user_id=user_id,
             )
 
             # 立即返回
@@ -276,7 +286,9 @@ async def file_upload(
             logger.warning(
                 f"请求被取消: {filename if 'filename' in locals() else 'unknown'}"
             )
-            raise HTTPException(status_code=499, detail="客户端已取消请求")
+            if temp_file_path and temp_file_path.exists():
+                await temp_processor.delete_temp_file(temp_file_path)
+            raise
         except Exception as e:
             logger.error(f"文件上传错误: {str(e)}", exc_info=True)
             # 清理临时文件
@@ -285,7 +297,7 @@ async def file_upload(
                     await temp_processor.delete_temp_file(temp_file_path)
                 except:
                     pass
-            raise HTTPException(status_code=500, detail=f"文件处理失败: {str(e)}")
+            raise HTTPException(status_code=500, detail="文件处理失败，请查看服务端处理记录")
 
 
 @router.post("/knowledge-bases")
@@ -297,7 +309,10 @@ async def create_knowledge_base(
 ):
     """创建知识库"""
     user_id = user_info["user_id"]
-    result = await postgresql_client.create_knowledge_base(knowledge_base_id, user_id)
+    storage_id = await namespace_id(postgresql_client, knowledge_base_id, user_id,
+        user_info.get("tenant_id", "default"), create=True)
+    async with KnowledgeOperations(postgresql_client, None).lock(storage_id, user_id) as conn:
+        result = await bound_client(postgresql_client, conn).create_knowledge_base(storage_id, user_id)
 
     if not result["success"]:
         if "已存在" in result["message"]:
@@ -312,7 +327,7 @@ async def create_knowledge_base(
     return CreateKnowledgeBaseResponse(
         knowledge_base_id=knowledge_base_id,
         status="success",
-        message=result["message"],
+        message="知识库创建成功",
     )
 
 
@@ -326,48 +341,19 @@ async def delete_knowledge_base(
     milvus_client=Depends(get_milvus_client),
     user_info: dict = Depends(require_permission(Permission.DELETE_KB)),
 ):
-    """删除知识库（先删 PostgreSQL，成功后再删 Milvus）"""
+    """Hide data first, remove vectors, then delete metadata; retry is idempotent."""
     user_id = user_info["user_id"]
+    storage_id = await namespace_id(postgresql_client, knowledge_base_id, user_id,
+        user_info.get("tenant_id", "default"))
     try:
-        # 1. 删除 PostgreSQL 中的知识库
-        pg_result = await postgresql_client.delete_knowledge_base(
-            knowledge_base_id, user_id
-        )
-
-        # 检查 PostgreSQL 删除是否成功
-        if not pg_result.get("success", False):
-            logger.error(
-                f"PostgreSQL删除知识库失败: {pg_result.get('message', '未知错误')}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=pg_result.get("message", "知识库不存在或无权删除"),
-            )
-
-        # 2. PostgreSQL 删除成功，继续删除 Milvus 中的子块
-        try:
-            child_chunks_deleted = await milvus_client.delete_knowledge_file_chunks(
-                knowledge_base_id=knowledge_base_id,
-                user_id=user_id,
-            )
-            logger.info(f"Milvus 删除成功，删除了 {child_chunks_deleted} 个子块")
-        except Exception as e:
-            # Milvus 删除失败，但 PostgreSQL 已删除成功
-            logger.error(
-                f"Milvus 删除失败（PostgreSQL 已删除知识库 {knowledge_base_id}）: {e}"
-            )
-            # 可以选择是否抛出异常，这里选择抛出异常让用户知道部分失败
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"PostgreSQL 删除成功，但 Milvus 删除失败: {str(e)}",
-            )
+        pg_result = await KnowledgeOperations(postgresql_client, milvus_client).delete(storage_id, user_id)
 
         # 3. 全部删除成功
         return DeleteKnowledgeBaseResponse(
             knowledge_base_id=knowledge_base_id,
             status="success",
             message=f"知识库删除成功",
-            child_chunks_deleted=child_chunks_deleted,
+            child_chunks_deleted=pg_result["child_chunks_deleted"],
         )
 
     except HTTPException:
@@ -376,7 +362,7 @@ async def delete_knowledge_base(
         logger.error(f"删除知识库失败: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"删除知识库失败: {str(e)}",
+            detail="知识库删除未完成，可重试恢复",
         )
 
 
@@ -388,7 +374,8 @@ async def get_user_knowledge_bases(
 ):
     """获取用户的所有知识库"""
     user_id = user_info["user_id"]
-    result = await postgresql_client.get_user_knowledge_bases(user_id)
+    names = await visible_names(postgresql_client, user_id, user_info.get("tenant_id", "default"))
+    result = {"success": True, "message": "知识库列表", "knowledge_bases": [name for name, _ in names], "count": len(names)}
     print("查询用户知识库结果:", result)
 
     if not result["success"]:
@@ -417,7 +404,8 @@ async def get_knowledge_base_files(
     """获取知识库中的所有文件"""
     user_id = user_info["user_id"]
     result = await postgresql_client.get_knowledge_base_files(
-        knowledge_base_id, user_id
+        await namespace_id(postgresql_client, knowledge_base_id, user_id,
+            user_info.get("tenant_id", "default")), user_id
     )
 
     if not result["success"]:
@@ -452,18 +440,16 @@ async def delete_file(
     milvus_client=Depends(get_milvus_client),
     user_info: dict = Depends(require_permission(Permission.DELETE_DOCUMENT)),
 ):
-    """删除文件-通过文件哈希删除（先删 PostgreSQL，成功后再删 Milvus）"""
+    """Retryable deletion under the same advisory lock as ingestion."""
     user_id = user_info["user_id"]
+    storage_id = await namespace_id(postgresql_client, knowledge_base_id, user_id,
+        user_info.get("tenant_id", "default"))
     deleted_parent_count = 0
     deleted_child_count = 0
 
     try:
         # 1. 删除 PostgreSQL 中的父块
-        pg_result = await postgresql_client.delete_file(
-            knowledge_base_id=knowledge_base_id,
-            file_hash=file_hash,
-            user_id=user_id,
-        )
+        pg_result = await KnowledgeOperations(postgresql_client, milvus_client).delete(storage_id, user_id, file_hash)
 
         # 检查 PostgreSQL 删除是否成功
         if not pg_result.get("success", False):
@@ -477,22 +463,7 @@ async def delete_file(
         # 获取删除的父块数量（用于返回信息）
         deleted_parent_count = pg_result.get("parent_chunks_deleted", 0)
 
-        # 2. PostgreSQL 删除成功，继续删除 Milvus 中的子块
-        try:
-            deleted_child_count = await milvus_client.delete_file_chunks(
-                knowledge_base_id=knowledge_base_id,
-                file_hash=file_hash,
-                user_id=user_id,
-            )
-            logger.info(f"Milvus 删除成功，删除了 {deleted_child_count} 个子块")
-        except Exception as e:
-            # Milvus 删除失败，但 PostgreSQL 已删除成功
-            # 记录错误但返回部分成功的信息
-            logger.error(f"Milvus 删除失败（PostgreSQL 已删除成功）: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"PostgreSQL 删除成功，但 Milvus 删除失败: {str(e)}",
-            )
+        deleted_child_count = pg_result["child_chunks_deleted"]
 
         # 3. 全部删除成功
         return DocumentDeleteResponse(
@@ -506,10 +477,26 @@ async def delete_file(
         raise
     except Exception as e:
         logger.error(f"删除失败: {e}")
-        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="文件删除未完成，可重试恢复")
 
 
 # ==================== 新增：多 Agent 编排对话接口 ====================
+
+@router.get("/knowledge-bases/{knowledge_base_id}/documents/{file_hash}/status")
+async def document_status(
+    knowledge_base_id: str, file_hash: str,
+    postgresql_client=Depends(get_postgresql_client),
+    user_info: dict = Depends(require_permission(Permission.CHAT)),
+):
+    owner = user_info["user_id"]
+    storage_id = await namespace_id(postgresql_client, knowledge_base_id, owner,
+        user_info.get("tenant_id", "default"))
+    async with postgresql_client.pool.acquire() as conn:
+        row = await conn.fetchrow("""SELECT kind,state,error_type,updated_at FROM rag_operations
+            WHERE knowledge_base_id=$1 AND user_id=$2 AND file_hash=$3""", storage_id, owner, file_hash)
+    if row is None:
+        raise HTTPException(status_code=404, detail="未找到该文档的处理记录")
+    return dict(row)
 
 @router.post("/chat/orchestrate")
 async def chat_orchestrate(

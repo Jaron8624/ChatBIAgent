@@ -14,6 +14,7 @@ MCP (Model Context Protocol) 工具协议实现
 import os
 import json
 import inspect
+import math
 import time
 from contextvars import ContextVar
 from jsonschema import validate as validate_json_schema
@@ -258,12 +259,16 @@ class LLMReranker:
 
             # 按 score 排序
             scored = []
+            seen = set()
             for s in scores:
+                if not isinstance(s, dict):
+                    continue
                 name = s.get("tool_name", "")
                 score = float(s.get("score", 0))
                 tool = next((t for t in candidate_tools if t.name == name), None)
-                if tool:
+                if tool and name not in seen and math.isfinite(score) and 0 < score <= 10:
                     scored.append((tool, score))
+                    seen.add(name)
 
             scored.sort(key=lambda x: x[1], reverse=True)
             top_tools = [t for t, _ in scored[:top_k]]
@@ -274,7 +279,9 @@ class LLMReranker:
         except Exception as e:
             logger.error(f"LLM 工具重排失败: {e}")
             # 降级：返回前 top_k 个
-            return candidate_tools[:top_k]
+            # Do not turn malformed model output into arbitrary tool calls,
+            # especially when a candidate has side effects.
+            return []
 
 
 # ==================== 统一工具路由器 ====================
@@ -516,7 +523,7 @@ class ExternalMCPServer:
     async def call_tool(self, name: str, arguments: Dict) -> str:
         """通过 SDK session.call_tool 调用外部 Server 的工具，返回拼接文本"""
         if not self._connected or self._session is None:
-            return f"外部 MCP Server [{self.name}] 未连接"
+            raise RuntimeError(f"外部 MCP Server [{self.name}] 未连接")
         try:
             async with asyncio.timeout(self.REQUEST_TIMEOUT):
                 result = await self._session.call_tool(name, arguments)
@@ -525,12 +532,12 @@ class ExternalMCPServer:
                 if getattr(c, "type", "") == "text"
             ]
             if result.isError:
-                return f"工具 {name} 返回错误: {' '.join(texts)}"
+                raise RuntimeError(f"工具 {name} 返回错误: {' '.join(texts)}")
             logger.info(f"外部工具执行成功: [{self.name}] {name}")
             return "\n".join(texts) if texts else str(result.content)
         except Exception as e:
             logger.error(f"外部工具 {name} 调用异常: {e}")
-            return f"工具 {name} 调用异常: {e}"
+            raise RuntimeError(f"工具 {name} 调用失败") from e
 
     async def disconnect(self):
         """断开连接：关闭 AsyncExitStack，SDK 负责子进程/HTTP 会话的优雅回收"""
