@@ -15,6 +15,7 @@ from infra.graph_checkpointer import (
     _protect_checkpoint,
     _restore_checkpoint_tuple,
     checkpoint_thread_id,
+    checkpoint_event_loop_factory,
 )
 from cryptography.fernet import Fernet
 
@@ -38,6 +39,14 @@ class CheckpointIdentityTests(unittest.TestCase):
         with patch.dict(os.environ, {"GRAPH_CHECKPOINT_FERNET_KEY": ""}):
             with self.assertRaises(RuntimeError):
                 checkpoint_thread_id("session-a", 17, "tenant-a")
+
+    def test_windows_compatible_loop_factory(self):
+        import asyncio
+        loop = checkpoint_event_loop_factory()()
+        try:
+            self.assertIsInstance(loop, asyncio.SelectorEventLoop)
+        finally:
+            loop.close()
 
 
 class _EncryptedJsonSerializer:

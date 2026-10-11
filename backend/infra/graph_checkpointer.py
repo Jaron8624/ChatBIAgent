@@ -8,11 +8,31 @@ import hashlib
 import hmac
 import logging
 import os
+import asyncio
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
+
+SESSION_CHECKPOINT_NS = "session"
+
+
+def checkpoint_event_loop_factory(use_subprocess: bool = False):
+    """Uvicorn loop factory compatible with async psycopg on Windows."""
+    return asyncio.SelectorEventLoop
+
+
+def checkpoint_run_thread_id(thread_id: str, run_id: str) -> str:
+    """Isolate graph runs without treating a random namespace as a subgraph."""
+    if not run_id or not run_id.isalnum():
+        raise ValueError("无效的图执行 ID")
+    return f"{thread_id}:run:{run_id}"
+
+
+def session_persistence_required() -> bool:
+    return os.getenv("SESSION_PERSISTENCE_REQUIRED", "true").lower() not in {"0", "false", "no"}
 
 
 class GraphCheckpointBusy(RuntimeError):
@@ -97,6 +117,12 @@ class GraphCheckpointerManager:
     async def initialize(self, dsn: str | None = None) -> None:
         if self.saver is not None:
             return
+        if os.name == "nt" and isinstance(asyncio.get_running_loop(), asyncio.ProactorEventLoop):
+            raise RuntimeError(
+                "Windows PostgreSQL Checkpointer 需要 SelectorEventLoop。"
+                "请用 python main.py，或给 uvicorn 加上 "
+                "--loop infra.graph_checkpointer:checkpoint_event_loop_factory。"
+            )
 
         dsn = dsn or os.getenv("DATABASE_URL", "").strip()
         if dsn.startswith("postgresql+asyncpg://"):
@@ -243,20 +269,81 @@ class GraphCheckpointerManager:
         if self.pool is None or self.saver is None:
             raise RuntimeError("LangGraph 检查点尚未初始化")
         async with self.session_lock(thread_id):
-            await self.saver.adelete_thread(thread_id)
-            async with self.pool.connection() as conn:
-                await conn.execute(
-                    "DELETE FROM nexusmind_checkpoint_threads WHERE thread_id = %s",
-                    (thread_id,),
-                )
+            async with self.session_lock(thread_id + ":snapshot"):
+                async with self.pool.connection() as conn:
+                    rows = await (await conn.execute(
+                        "SELECT thread_id FROM nexusmind_checkpoint_threads WHERE starts_with(thread_id, %s)",
+                        (thread_id + ":run:",),
+                    )).fetchall()
+                for target in [row["thread_id"] for row in rows] + [thread_id]:
+                    await self.saver.adelete_thread(target)
+                    async with self.pool.connection() as conn:
+                        await conn.execute(
+                            "DELETE FROM nexusmind_checkpoint_threads WHERE thread_id = %s",
+                            (target,),
+                        )
+
+    async def save_session_snapshot(self, thread_id: str, snapshot: dict, *, is_deleted=None,
+                                    expected_run_id: str | None = None) -> bool:
+        """Save canonical history and the execution pointer in a fixed namespace.
+
+        The separate snapshot lock also serializes saves with deletion without
+        reacquiring the execution lock already held by the orchestrator.
+        """
+        from langgraph.checkpoint.base import empty_checkpoint
+        saver = self.require_saver()
+        async with self.session_lock(thread_id + ":snapshot"):
+            if is_deleted is not None and await is_deleted():
+                return False
+            config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": SESSION_CHECKPOINT_NS}}
+            previous = await saver.aget_tuple(config)
+            if expected_run_id is not None:
+                previous_state = ((previous.checkpoint.get("channel_values", {}).get("session_snapshot", {}).get("state", {}))
+                                  if previous else {})
+                if (previous_state.get("active_run_id") != expected_run_id
+                        or previous_state.get("run_status") not in {"running", "interrupted"}):
+                    return False
+            checkpoint = empty_checkpoint()
+            old_version = (previous.checkpoint.get("channel_versions", {}).get("session_snapshot")
+                           if previous else None)
+            version = saver.get_next_version(old_version, None)
+            checkpoint["channel_values"] = {"session_snapshot": snapshot}
+            checkpoint["channel_versions"] = {"session_snapshot": version}
+            # Index before writing so interrupted writes remain discoverable for deletion.
+            await self.touch_thread(thread_id)
+            await saver.aput(config, checkpoint, {"source": "update", "step": 0}, {"session_snapshot": version})
+            if is_deleted is not None and await is_deleted():
+                await saver.adelete_thread(thread_id)
+                return False
+            return True
+
+    async def load_session_snapshot(self, thread_id: str) -> dict | None:
+        saved = await self.require_saver().aget_tuple({"configurable": {
+            "thread_id": thread_id, "checkpoint_ns": SESSION_CHECKPOINT_NS,
+        }})
+        if saved is None:
+            return None
+        return saved.checkpoint.get("channel_values", {}).get("session_snapshot")
 
     async def thread_snapshot(self, thread_id: str, checkpoint_ns: str = ""):
         """Read persisted graph state for one session and execution namespace."""
         if self.saver is None:
             raise RuntimeError("LangGraph 检查点尚未初始化")
-        return await self.saver.aget_state(
+        saved = await self.saver.aget_tuple(
             {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
         )
+        if saved is None:
+            return SimpleNamespace(values={}, next=(), config=None, pending_writes=())
+        values = dict(saved.checkpoint.get("channel_values") or {})
+        # This is a saver-level view. Actual resumption uses graph.aget_state,
+        # which applies task writes and the graph's scheduler to this tuple.
+        next_nodes = [name[len("branch:to:"):] for name in values if name.startswith("branch:to:")]
+        for send in saved.checkpoint.get("pending_sends") or ():
+            node = getattr(send, "node", None)
+            if node and node not in next_nodes:
+                next_nodes.append(node)
+        return SimpleNamespace(values=values, next=tuple(next_nodes), config=saved.config,
+                               pending_writes=saved.pending_writes)
 
     async def prune_expired(self) -> int:
         """Delete whole graph threads after their configured idle retention."""

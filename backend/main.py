@@ -100,6 +100,13 @@ async def lifespan(app: FastAPI):
         )
         if checkpoint_setting in {"0", "false", "no", "off"}:
             checkpoint_enabled = False
+        from infra.graph_checkpointer import session_persistence_required
+        if session_persistence_required() and not checkpoint_enabled:
+            raise RuntimeError(
+                "会话持久化是必需的。请启用 GRAPH_CHECKPOINT_ENABLED 并配置 "
+                "GRAPH_CHECKPOINT_FERNET_KEY；仅临时开发可显式设置 "
+                "SESSION_PERSISTENCE_REQUIRED=false 使用 cache_only 模式。"
+            )
         if checkpoint_enabled:
             await initialize_graph_checkpointer()
             task = asyncio.create_task(prune_graph_checkpoints())
@@ -207,5 +214,6 @@ if __name__ == "__main__":
         "main:app",
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", 8000)),
+        loop="infra.graph_checkpointer:checkpoint_event_loop_factory" if os.name == "nt" else "auto",
         reload=False
     )

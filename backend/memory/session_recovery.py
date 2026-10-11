@@ -80,9 +80,12 @@ class SessionManager:
         return f"nexusmind:session-deleted:{digest}"
 
     async def is_session_deleted(self, session_id: str, user_id: int, tenant_id: str) -> bool:
-        redis = await self._get_redis()
-        if await redis.exists(self._deleted_key(session_id, user_id, tenant_id)):
-            return True
+        try:
+            redis = await self._get_redis()
+            if await redis.exists(self._deleted_key(session_id, user_id, tenant_id)):
+                return True
+        except Exception:
+            logger.warning("Redis 删除标记不可用，使用持久化归属登记", exc_info=True)
         from infra.postgresql_client import get_postgresql_client
         pg_client = await get_postgresql_client()
         status = await pg_client.get_session_registry_status(
@@ -90,6 +93,22 @@ class SessionManager:
         )
         # Fail closed both for an explicit deletion and an ID owned by another identity.
         return status in {"deleted", "owner_mismatch"}
+
+    @staticmethod
+    def _persistence_manager():
+        from infra.graph_checkpointer import get_graph_checkpointer_manager, session_persistence_required
+        manager = get_graph_checkpointer_manager()
+        if manager.saver is None and session_persistence_required():
+            raise RuntimeError("会话持久化必需，但 graph checkpointer 未启用")
+        return manager
+
+    async def _cache_snapshot(self, snapshot: SessionSnapshot) -> None:
+        redis = await self._get_redis()
+        compressed = zlib.compress(json.dumps(snapshot.to_dict(), ensure_ascii=False).encode("utf-8"))
+        await redis.set(f"nexusmind:session:{snapshot.session_id}", compressed, ex=SESSION_TTL_SECONDS)
+        index_key = f"nexusmind:sessions:{snapshot.user_id}"
+        await redis.zadd(index_key, {snapshot.session_id: datetime.now().timestamp()})
+        await redis.expire(index_key, SESSION_TTL_SECONDS)
 
     # ==================== 保存 ====================
 
@@ -102,11 +121,13 @@ class SessionManager:
         summary: str = "",
         token_count: int = 0,
         tenant_id: str = "default",
+        *,
+        expected_run_id: Optional[str] = None,
     ) -> bool:
-        """保存会话快照到 Redis"""
+        """Persist canonical history first, then refresh the optional Redis cache."""
         if user_id <= 0:
             return False  # Anonymous users have no stable authenticated identity.
-        redis = await self._get_redis()
+        manager = self._persistence_manager()
         if await self.is_session_deleted(session_id, user_id, tenant_id):
             logger.info("拒绝复活已删除会话: %s", session_id)
             return False
@@ -119,26 +140,38 @@ class SessionManager:
             session_id=session_id,
             user_id=user_id,
             messages=messages,
-            state=state or {},
+            state={**(state or {}), "persistence_mode": "durable" if manager.saver is not None else "cache_only"},
             summary=summary,
             token_count=token_count,
             tenant_id=tenant_id or "default",
             updated_at=datetime.now().isoformat(),
         )
-        # 压缩存储
-        data = json.dumps(snapshot.to_dict(), ensure_ascii=False)
-        compressed = zlib.compress(data.encode("utf-8"))
+        if manager.saver is not None:
+            from infra.graph_checkpointer import checkpoint_thread_id
+            saved = await manager.save_session_snapshot(
+                checkpoint_thread_id(session_id, user_id, tenant_id), snapshot.to_dict(),
+                is_deleted=lambda: self.is_session_deleted(session_id, user_id, tenant_id),
+                expected_run_id=expected_run_id,
+            )
+            if not saved:
+                return False
         key = f"nexusmind:session:{session_id}"
-        await redis.set(key, compressed, ex=SESSION_TTL_SECONDS)
-        # 维护用户会话索引
         index_key = f"nexusmind:sessions:{user_id}"
-        await redis.zadd(index_key, {session_id: datetime.now().timestamp()})
-        await redis.expire(index_key, SESSION_TTL_SECONDS)
+        try:
+            await self._cache_snapshot(snapshot)
+        except Exception:
+            if manager.saver is None:
+                raise
+            logger.warning("持久化成功，Redis 会话缓存更新失败", exc_info=True)
         # Recheck after Redis writes to close the race where deletion marks the
         # PostgreSQL registry after the pre-write check but before this snapshot.
         if await self.is_session_deleted(session_id, user_id, tenant_id):
-            await redis.delete(key)
-            await redis.zrem(index_key, session_id)
+            try:
+                redis = await self._get_redis()
+                await redis.delete(key)
+                await redis.zrem(index_key, session_id)
+            except Exception:
+                logger.warning("删除期间缓存清理失败", exc_info=True)
             logger.info("删除并发期间写入的会话快照已清理: %s", session_id)
             return False
         logger.info(f"会话已保存: {session_id}, tokens={token_count}")
@@ -160,20 +193,42 @@ class SessionManager:
         """
         if user_id <= 0:
             return None
-        redis = await self._get_redis()
+        manager = self._persistence_manager()
         if not include_deleted and await self.is_session_deleted(
             session_id, user_id, tenant_id
         ):
             return None
-        key = f"nexusmind:session:{session_id}"
-        compressed = await redis.get(key)
+        # With a saver, always read the authoritative checkpoint. A successful
+        # durable write followed by a failed cache write must not return stale state.
+        if manager.saver is not None:
+            from infra.graph_checkpointer import checkpoint_thread_id
+            data = await manager.load_session_snapshot(checkpoint_thread_id(session_id, user_id, tenant_id))
+            if data is not None:
+                snapshot = SessionSnapshot.from_dict(data)
+                if (snapshot.session_id != session_id or snapshot.user_id != user_id
+                        or snapshot.tenant_id != (tenant_id or "default")):
+                    return None
+                if not include_deleted and await self.is_session_deleted(session_id, user_id, tenant_id):
+                    return None
+                try:
+                    await self._cache_snapshot(snapshot)
+                except Exception:
+                    logger.warning("恢复成功，Redis 缓存回填失败", exc_info=True)
+                return snapshot
+            # Redis-only pre-upgrade snapshots can be migrated on their next save.
+        try:
+            redis = await self._get_redis()
+            compressed = await redis.get(f"nexusmind:session:{session_id}")
+        except Exception:
+            if manager.saver is None:
+                raise
+            return None
         if not compressed:
-            logger.warning(f"会话不存在或已过期: {session_id}")
             return None
         try:
             data = zlib.decompress(compressed).decode("utf-8")
             snapshot = SessionSnapshot.from_dict(json.loads(data))
-            if snapshot.user_id != user_id or snapshot.tenant_id != (tenant_id or "default"):
+            if snapshot.session_id != session_id or snapshot.user_id != user_id or snapshot.tenant_id != (tenant_id or "default"):
                 logger.warning("会话归属校验未通过: %s", session_id)
                 return None
             logger.info(f"会话已恢复: {session_id}, messages={len(snapshot.messages)}")
@@ -192,10 +247,8 @@ class SessionManager:
         恢复或创建新会话
         返回 (session_id, snapshot_or_None)
         """
-        if session_id:
-            redis = await self._get_redis()
-            if await redis.exists(self._deleted_key(session_id, user_id, tenant_id)):
-                session_id = None
+        if session_id and user_id > 0 and await self.is_session_deleted(session_id, user_id, tenant_id):
+            session_id = None
         if session_id:
             snapshot = await self.resume_session(session_id, user_id, tenant_id)
             if snapshot:
@@ -347,31 +400,39 @@ class SessionManager:
         """列出用户的活跃会话"""
         if user_id <= 0:
             return []
-        redis = await self._get_redis()
-        index_key = f"nexusmind:sessions:{user_id}"
-        session_ids = await redis.zrevrange(index_key, 0, limit - 1)
+        manager = self._persistence_manager()
+        if manager.saver is not None:
+            from infra.postgresql_client import get_postgresql_client
+            pg = await get_postgresql_client()
+            async with pg.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT session_id FROM nexusmind_session_registry "
+                    "WHERE user_id = $1 AND tenant_id = $2 AND status = 'active' "
+                    "ORDER BY updated_at DESC LIMIT $3",
+                    user_id, tenant_id or "default", max(0, limit),
+                )
+            session_ids = [row["session_id"] for row in rows]
+        else:
+            redis = await self._get_redis()
+            index_key = f"nexusmind:sessions:{user_id}"
+            session_ids = await redis.zrevrange(index_key, 0, limit - 1)
         sessions = []
         for sid in session_ids:
-            if await self.is_session_deleted(sid, user_id, tenant_id):
+            if isinstance(sid, bytes):
+                sid = sid.decode("utf-8")
+            snapshot = await self.resume_session(sid, user_id, tenant_id)
+            if snapshot is None:
                 continue
-            key = f"nexusmind:session:{sid}"
-            compressed = await redis.get(key)
-            if compressed:
-                try:
-                    data = json.loads(zlib.decompress(compressed).decode("utf-8"))
-                    if data.get("user_id") != user_id or data.get("tenant_id", "default") != (tenant_id or "default"):
-                        continue
-                    sessions.append({
-                        "session_id": data["session_id"],
-                        "summary": data.get("summary", "")[:100],
-                        "token_count": data.get("token_count", 0),
-                        "updated_at": data.get("updated_at", ""),
-                        "message_count": len(data.get("messages", [])),
-                        "run_status": (data.get("state") or {}).get("run_status", "idle"),
-                        "recoverable": bool((data.get("state") or {}).get("recoverable")),
-                    })
-                except Exception:
-                    pass
+            sessions.append({
+                "session_id": snapshot.session_id,
+                "summary": snapshot.summary[:100],
+                "token_count": snapshot.token_count,
+                "updated_at": snapshot.updated_at,
+                "message_count": len(snapshot.messages),
+                "run_status": snapshot.state.get("run_status", "idle"),
+                "recoverable": bool(snapshot.state.get("recoverable")),
+                "persistence_mode": snapshot.state.get("persistence_mode", "cache_only"),
+            })
         return sessions
 
     async def delete_session(self, session_id: str, user_id: int, tenant_id: str = "default") -> bool:
@@ -414,11 +475,14 @@ class SessionManager:
         # 先落库删除标记，Redis 丢失或请求中断都不能让会话重新激活。
         if not await pg_client.mark_session_deleted(session_id, user_id, tenant_id):
             return False
-        redis = await self._get_redis()
         # A tombstone blocks an in-flight request from recreating the snapshot
         # after deletion. The user can start a fresh server-issued session ID.
         tombstone_key = self._deleted_key(session_id, user_id, tenant_id)
-        await redis.set(tombstone_key, "1", ex=SESSION_TTL_SECONDS)
+        try:
+            redis = await self._get_redis()
+            await redis.set(tombstone_key, "1", ex=SESSION_TTL_SECONDS)
+        except Exception:
+            logger.warning("Redis 删除标记写入失败，持久化删除标记已生效", exc_info=True)
 
         from infra.graph_checkpointer import (
             checkpoint_thread_id,
@@ -441,10 +505,14 @@ class SessionManager:
         await milvus_client.delete_session_memories(user_id, tenant_id, session_id)
 
         key = f"nexusmind:session:{session_id}"
-        await redis.delete(key)
         index_key = f"nexusmind:sessions:{user_id}"
-        await redis.zrem(index_key, session_id)
-        await redis.delete(f"nexusmind:state:{session_id}")
+        try:
+            redis = await self._get_redis()
+            await redis.delete(key)
+            await redis.zrem(index_key, session_id)
+            await redis.delete(f"nexusmind:state:{session_id}")
+        except Exception:
+            logger.warning("已删除会话的 Redis 缓存清理失败", exc_info=True)
         logger.info(f"会话已删除: {session_id}")
         return True
 

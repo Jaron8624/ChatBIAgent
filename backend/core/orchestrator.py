@@ -648,6 +648,13 @@ class Orchestrator:
         return self._graph
 
     @staticmethod
+    def _conversation_messages(messages):
+        """Only user turns and visible answers belong to the canonical transcript."""
+        return [dict(message) for message in (messages or [])
+                if message.get("role") in {"user", "assistant"}
+                and not message.get("context_kind") and not message.get("tool_calls")]
+
+    @staticmethod
     async def _save_completed_session_turn(
         session_mgr,
         *,
@@ -661,10 +668,15 @@ class Orchestrator:
         token_count: int = 0,
     ) -> bool:
         """Persist the visible transcript and idempotent memory-ingestion source."""
-        visible_messages = [
-            dict(message) for message in messages
-            if message.get("context_kind") != "long_term_memory"
-        ]
+        visible_messages = Orchestrator._conversation_messages(messages)
+        # Accept either pending history or history already containing the result.
+        # Remove the existing final answer before checking for the pending user.
+        if (len(visible_messages) >= 2
+                and visible_messages[-1].get("role") == "assistant"
+                and visible_messages[-1].get("content") == answer
+                and visible_messages[-2].get("role") == "user"
+                and visible_messages[-2].get("content") == query):
+            visible_messages.pop()
         if not visible_messages or visible_messages[-1].get("role") != "user" or visible_messages[-1].get("content") != query:
             visible_messages.append({"role": "user", "content": query})
         if not visible_messages or visible_messages[-1].get("role") != "assistant" or visible_messages[-1].get("content") != answer:
@@ -680,10 +692,10 @@ class Orchestrator:
             tenant_id=tenant_id,
         )
         if not saved:
-            return False
+            raise RuntimeError("完成会话保存失败，不能返回保存成功")
 
         if await session_mgr.is_session_deleted(session_id, user_id, tenant_id):
-            return False
+            raise PermissionError("该会话已删除，不能返回保存成功")
 
         if user_id > 0 and os.getenv("LONG_TERM_MEMORY_INGEST_ENABLED", "true").lower() in {"1", "true", "yes"}:
             try:
@@ -732,7 +744,10 @@ class Orchestrator:
             return response
         thread_id = checkpoint_thread_id(session_id, user_id, tenant_id)
         try:
-            checkpoint = await manager.thread_snapshot(thread_id, str(run_id))
+            checkpoint = await manager.thread_snapshot(
+                state.get("active_thread_id") or thread_id,
+                state.get("active_checkpoint_ns", str(run_id)),
+            )
             response["next_nodes"] = list(checkpoint.next or ())
             response["recoverable"] = bool(checkpoint.next or checkpoint.values)
         except Exception as exc:
@@ -766,16 +781,25 @@ class Orchestrator:
         graph = self._get_graph()
         config = {
             "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": run_id,
+                "thread_id": run_state.get("active_thread_id") or thread_id,
+                "checkpoint_ns": run_state.get("active_checkpoint_ns", run_id),
             }
         }
+        if config["configurable"]["checkpoint_ns"]:
+            # Compatibility with old per-run namespaces: bypass subgraph lookup.
+            config["configurable"]["__pregel_checkpointer"] = manager.saver
         query = str(run_state.get("active_query") or "")
         if not query:
             raise ValueError("会话缺少待恢复的用户问题")
 
         try:
             async with manager.session_lock(thread_id):
+                # Re-read after taking the same lock as execution and deletion.
+                current = await session_mgr.resume_session(session_id, user_id, tenant_id)
+                if current is None or current.state.get("active_run_id") != run_id:
+                    raise RuntimeError("会话已删除或执行状态已改变")
+                if current.state.get("run_status") not in {"running", "interrupted"}:
+                    raise ValueError("该执行已完成")
                 checkpoint = await graph.aget_state(config)
                 if checkpoint.next:
                     from core.context_store import context_identity
@@ -786,6 +810,11 @@ class Orchestrator:
                 answer = str(result.get("final_response") or "")
                 if not answer:
                     raise RuntimeError("检查点中没有可返回的最终答案")
+                await self._save_completed_session_turn(
+                    session_mgr, session_id=session_id, user_id=user_id, tenant_id=tenant_id,
+                    messages=current.messages, query=query, answer=answer, run_id=run_id,
+                    token_count=int(result.get("tokens_consumed", current.token_count) or 0),
+                )
         except BaseException:
             try:
                 await asyncio.shield(session_mgr.save_session(
@@ -796,6 +825,7 @@ class Orchestrator:
                     summary=session.summary,
                     token_count=session.token_count,
                     tenant_id=tenant_id,
+                    expected_run_id=run_id,
                 ))
             except Exception:
                 logger.exception("更新图恢复中断状态失败")
@@ -803,17 +833,6 @@ class Orchestrator:
 
         result["session_id"] = session_id
         result["recovered"] = True
-        await self._save_completed_session_turn(
-            session_mgr,
-            session_id=session_id,
-            user_id=user_id,
-            tenant_id=tenant_id,
-            messages=session.messages,
-            query=query,
-            answer=answer,
-            run_id=run_id,
-            token_count=int(result.get("tokens_consumed", session.token_count) or 0),
-        )
         return result
 
     async def _supervisor_node(self, state: AgentState) -> Dict[str, Any]:
@@ -1722,10 +1741,15 @@ class Orchestrator:
                 if message.get("context_kind") != "long_term_memory"
                 and not str(message.get("content", "")).startswith("【用户背景记忆】")
             ]
-            # Once a server-issued session exists, Redis is the canonical source.
+            # Once a server-issued session exists, the saved transcript is authoritative.
             # Appending browser history here duplicates every prior turn and lets
             # a client alter the server-owned transcript.
             messages = persisted
+
+        # Keep original text separate from the compressed model window. Neither
+        # injected memories nor tool traces can overwrite the durable transcript.
+        canonical_messages = self._conversation_messages(messages)
+        messages = [dict(message) for message in (messages or [])]
 
         # 关键：graph 内部节点使用 resumed_sid 发事件，回调需注册到 resumed_sid 下
         if on_event:
@@ -1820,11 +1844,15 @@ class Orchestrator:
             GraphCheckpointBusy,
             checkpoint_thread_id,
             get_graph_checkpointer_manager,
+            checkpoint_run_thread_id,
+            session_persistence_required,
         )
         graph_manager = get_graph_checkpointer_manager()
         graph = self._get_graph()
         run_id = uuid.uuid4().hex
         has_checkpointer = graph_manager.saver is not None
+        if user_id > 0 and not has_checkpointer and session_persistence_required():
+            raise RuntimeError("会话持久化必需，但 graph checkpointer 未启用")
         if has_checkpointer:
             if user_id > 0:
                 graph_thread_id = checkpoint_thread_id(resumed_sid, user_id, tenant_id)
@@ -1833,18 +1861,15 @@ class Orchestrator:
                 graph_thread_id = f"nexusmind:anonymous:{uuid.uuid4().hex}"
             graph_config = {
                 "configurable": {
-                    "thread_id": graph_thread_id,
-                    "checkpoint_ns": run_id,
+                    "thread_id": checkpoint_run_thread_id(graph_thread_id, run_id) if user_id > 0 else graph_thread_id,
+                    "checkpoint_ns": "",
                 }
             }
         else:
             graph_thread_id = ""
             graph_config = None
 
-        pending_messages = [
-            dict(message) for message in (messages or [])
-            if message.get("context_kind") != "long_term_memory"
-        ]
+        pending_messages = canonical_messages
         if not pending_messages or pending_messages[-1].get("role") != "user" or pending_messages[-1].get("content") != query:
             pending_messages.append({"role": "user", "content": query})
         run_state_saved = False
@@ -1861,6 +1886,8 @@ class Orchestrator:
                     "run_status": "running",
                     "active_run_id": run_id,
                     "active_query": query,
+                    "active_thread_id": graph_config["configurable"]["thread_id"] if graph_config else "",
+                    "active_checkpoint_ns": "",
                     "recoverable": has_checkpointer,
                 },
                 summary=(snapshot.summary if snapshot else ""),
@@ -1881,7 +1908,7 @@ class Orchestrator:
                     tenant_id=tenant_id,
                     messages=pending_messages,
                     query=query,
-                    answer=str(result.get("final_response", "")),
+                    answer=str(result.get("final_response") or result.get("response") or ""),
                     run_id=run_id,
                     token_count=int(result.get("tokens_consumed", 0) or 0),
                 )
@@ -1897,11 +1924,14 @@ class Orchestrator:
                     "run_status": "interrupted" if has_checkpointer else "failed_unrecoverable",
                     "active_run_id": run_id,
                     "active_query": query,
+                    "active_thread_id": graph_config["configurable"]["thread_id"] if graph_config else "",
+                    "active_checkpoint_ns": "",
                     "recoverable": has_checkpointer,
                 },
                 summary=(snapshot.summary if snapshot else ""),
                 token_count=(snapshot.token_count if snapshot else 0),
                 tenant_id=tenant_id,
+                expected_run_id=run_id,
             ))
 
         async def invoke_graph():
@@ -1918,6 +1948,13 @@ class Orchestrator:
             if graph_config is not None:
                 async with graph_manager.session_lock(graph_thread_id):
                     await graph_manager.touch_thread(graph_thread_id)
+                    if user_id > 0:
+                        await graph_manager.touch_thread(graph_config["configurable"]["thread_id"])
+                    current = await session_mgr.resume_session(resumed_sid, user_id, tenant_id) if user_id > 0 else None
+                    if current and (current.state.get("run_status") in {"running", "interrupted"}
+                                    or (snapshot and current.updated_at != snapshot.updated_at)
+                                    or snapshot is None):
+                        raise RuntimeError("会话执行状态已改变，请重新加载后重试")
                     await save_running_state()
                     result = await invoke_graph()
                     await persist_completed_state(result)

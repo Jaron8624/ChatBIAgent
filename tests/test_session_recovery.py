@@ -1,4 +1,5 @@
 import sys
+import os
 import types
 import unittest
 from pathlib import Path
@@ -121,6 +122,9 @@ class MemoryRedis:
 
 class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        cache_mode = patch.dict(os.environ, {"SESSION_PERSISTENCE_REQUIRED": "false"})
+        cache_mode.start()
+        self.addCleanup(cache_mode.stop)
         memory_pg.records.clear()
         memory_pg.deleted_threads.clear()
         self.manager = object.__new__(SessionManager)
@@ -147,6 +151,7 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             saver = None
 
         graph_module.get_graph_checkpointer_manager = lambda: GraphManager()
+        graph_module.session_persistence_required = lambda: False
         graph_module.checkpoint_thread_id = lambda *args: "opaque-thread"
 
         context_module = types.ModuleType("core.context_store")
@@ -191,6 +196,7 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             saver = None
 
         graph_module.get_graph_checkpointer_manager = lambda: GraphManager()
+        graph_module.session_persistence_required = lambda: False
         graph_module.checkpoint_thread_id = lambda *args: "opaque-thread"
         context_module = types.ModuleType("core.context_store")
         context_module.context_identity = lambda *args: nullcontext()
