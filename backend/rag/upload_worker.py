@@ -2,6 +2,27 @@
 import asyncio
 import os
 from dotenv import load_dotenv
+from pathlib import Path
+import time
+
+
+async def report_health(pg, milvus):
+    path = Path(os.getenv("WORKER_HEALTH_FILE", "/tmp/nexusmind-worker-health"))
+    path.unlink(missing_ok=True)
+    try:
+        while True:
+            try:
+                async with asyncio.timeout(8):
+                    async with pg.pool.acquire() as conn:
+                        await conn.fetchval("SELECT 1")
+                    if not await milvus.client.has_collection(milvus.knowledge_base_collection):
+                        raise RuntimeError("knowledge_collection_missing")
+                path.write_text(str(time.time()))
+            except Exception:
+                path.unlink(missing_ok=True)
+            await asyncio.sleep(10)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 async def main():
@@ -16,6 +37,7 @@ async def main():
     tasks = []
     try:
         milvus = await get_milvus_client()
+        tasks.append(asyncio.create_task(report_health(pg, milvus)))
         if os.getenv("MAINTENANCE_ENABLED", "false").lower() == "true":
             from main import check_and_store_memory, prune_graph_checkpoints
             from infra.graph_checkpointer import initialize_graph_checkpointer

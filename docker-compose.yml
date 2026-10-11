@@ -1,5 +1,5 @@
 # NexusMind 一键部署编排
-# 使用：cp .env.example .env && 编辑 .env 填入 API Key && docker compose up -d
+# 使用：配置模型后运行 python scripts/deploy.py；首次部署先运行 --init。
 #
 # 说明：
 # - milvus/etcd/minio：完整版向量数据库（生产级）
@@ -115,6 +115,9 @@ services:
     build:
       context: .
       dockerfile: backend.Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: nexusmind-backend:local
     env_file: .env
     environment:
       # 覆盖 .env 中的本地地址，指向 compose 内部服务
@@ -126,21 +129,34 @@ services:
       UPLOAD_WORKER_MODE: external
       MAINTENANCE_ENABLED: "false"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
+      CONTEXT_STORE_DIR: /app/runtime/context_store
+      EVOLUTION_DIR: /app/runtime/evolution
     volumes:
       - nexusmind_uploads:/app/data/uploads
+      - nexusmind_runtime:/app/runtime
+      - nexusmind_demo:/app/data:ro
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       milvus:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py", "api"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 120s
     restart: unless-stopped
 
   worker:
     build:
       context: .
       dockerfile: backend.Dockerfile
+    image: nexusmind-backend:local
     command: ["python", "-m", "rag.upload_worker"]
     env_file: .env
     environment:
@@ -152,14 +168,66 @@ services:
       REDIS_URL: redis://redis:6379/0
       MAINTENANCE_ENABLED: "true"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
+      CONTEXT_STORE_DIR: /app/runtime/context_store
+      EVOLUTION_DIR: /app/runtime/evolution
+      WORKER_HEALTH_FILE: /tmp/nexusmind-worker-health
     volumes:
       - nexusmind_uploads:/app/data/uploads
+      - nexusmind_runtime:/app/runtime
+      - nexusmind_demo:/app/data:ro
     depends_on:
       postgres:
         condition: service_healthy
       milvus:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py", "worker"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 120s
+    restart: unless-stopped
+
+  migrate:
+    image: nexusmind-backend:local
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    command: ["python", "/app/scripts/migrate_database.py"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
+      HARNESS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
+      DEMO_DATA_ENABLED: "true"
+    volumes:
+      - nexusmind_demo:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    image: nexusmind-frontend:local
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
 volumes:
   nexusmind_uploads:
+  nexusmind_runtime:
+  nexusmind_demo:

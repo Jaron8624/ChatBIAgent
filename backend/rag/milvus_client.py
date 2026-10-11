@@ -114,13 +114,22 @@ class AsyncMilvusClientWrapper:
             if self._collection_initialized:
                 return
             from infra.postgresql_client import get_postgresql_client
-            from rag.index_contract import bind_collection, index_configuration
+            from rag.index_contract import bind_collection, index_configuration, repair_vector_indexes
             pg = await get_postgresql_client()
-            for collection, kind in ((self.knowledge_base_collection, "knowledge"), (self.memory_collection, "memory")):
-                await bind_collection(pg, self.client, collection, index_configuration(self.dense_dim, kind),
-                    adopt_legacy=os.getenv("INDEX_ADOPT_LEGACY", "false").lower() == "true")
-            await self._init_knowledge_base_collection()
-            await self._init_memory_collection()
+            # API and worker can start simultaneously. A local asyncio lock
+            # cannot stop another process loading a half-indexed collection.
+            # Lock each collection name in sorted order, including partial overlap.
+            async with pg.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute("SET LOCAL lock_timeout = '120s'")
+                    for name in sorted({self.knowledge_base_collection, self.memory_collection}):
+                        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "collection-init:" + name)
+                    for collection, kind in ((self.knowledge_base_collection, "knowledge"), (self.memory_collection, "memory")):
+                        await bind_collection(pg, self.client, collection, index_configuration(self.dense_dim, kind),
+                            adopt_legacy=os.getenv("INDEX_ADOPT_LEGACY", "false").lower() == "true")
+                        await repair_vector_indexes(self.client, collection, kind)
+                    await self._init_knowledge_base_collection()
+                    await self._init_memory_collection()
             self._collection_initialized = True
 
     async def _init_memory_collection(self):

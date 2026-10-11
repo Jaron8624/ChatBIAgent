@@ -9,6 +9,37 @@ DDL = """CREATE TABLE IF NOT EXISTS rag_index_contracts (
 );"""
 
 
+async def repair_vector_indexes(client, collection, kind):
+    """Resume interrupted creation after the immutable contract was validated.
+
+    Never drop or replace an existing index. Missing vector indexes alone are
+    sufficient to make an otherwise valid collection impossible to load.
+    """
+    if not await client.has_collection(collection):
+        return
+    names = await client.list_indexes(collection_name=collection)
+    fields = {}
+    for name in names:
+        description = await client.describe_index(collection_name=collection, index_name=name)
+        fields[description.get("field_name")] = name
+    required = (("dense_vector", "dense_index"), ("sparse_bm25", "sparse_bm25_index")) if kind == "knowledge" else (
+        ("vector", "vector_index"), ("sparse_vector", "sparse_index"))
+    for field, name in required:
+        if field in fields:
+            continue
+        if name in names:
+            raise ValueError("index_name_conflicts_with_expected_field")
+        params = client.prepare_index_params()
+        sparse = field.startswith("sparse")
+        options = {"field_name": field, "index_name": name,
+            "index_type": "SPARSE_INVERTED_INDEX" if sparse else "HNSW",
+            "metric_type": "BM25" if sparse else "COSINE"}
+        if not sparse:
+            options["params"] = {"M": 16, "efConstruction": 200}
+        params.add_index(**options)
+        await client.create_index(collection_name=collection, index_params=params)
+
+
 def index_configuration(dimension, kind):
     from rag.embedding_provider import _PROVIDER_DEFAULTS
     from infra import config

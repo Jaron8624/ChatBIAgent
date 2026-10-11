@@ -2,6 +2,7 @@ import api
 import uvicorn
 import os
 from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from rag.milvus_client import get_milvus_client
@@ -184,6 +185,28 @@ app = FastAPI(title="NexusMind-企业级智能知识助手", lifespan=lifespan)
 
 # 将项目中定义的所有 API 端点注册到应用中
 app.include_router(api.router)
+
+
+@app.get("/health/live", include_in_schema=False)
+async def live():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def ready():
+    """Readiness covers durable dependencies, not a paid model request."""
+    try:
+        async with asyncio.timeout(5):
+            async with app.state.postgresql_client.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            milvus = app.state.milvus_client
+            if not await milvus.client.has_collection(milvus.knowledge_base_collection):
+                raise RuntimeError("knowledge_collection_missing")
+            if os.getenv("REDIS_REQUIRED", "false").lower() == "true":
+                await app.state.redis_client.ping()
+        return {"status": "ready"}
+    except Exception:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
 
 # 解决前端跨域访问问题
 cors_origins = [

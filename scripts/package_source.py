@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--rag-report", type=Path)
     parser.add_argument("--knowledge-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
+    parser.add_argument("--deployment-report", type=Path)
     args = parser.parse_args()
     report_path = args.report.resolve()
     report_path.relative_to(ROOT / "artifacts" / "session_runtime")
@@ -37,7 +38,8 @@ def main():
     for label, value, directory in (("module-audit", args.audit_report, "module_audit"),
                                     ("rag-filter-runtime", args.rag_report, "rag_filter_runtime"),
                                     ("knowledge-runtime", args.knowledge_report, "knowledge_runtime"),
-                                    ("architecture-runtime", args.architecture_report, "architecture_runtime")):
+                                    ("architecture-runtime", args.architecture_report, "architecture_runtime"),
+                                    ("deployment-runtime", args.deployment_report, "deployment_runtime")):
         if value is None:
             continue
         path = value.resolve()

@@ -10,6 +10,13 @@ docker-data
 data/uploads
 data/*.db
 data/*.jsonl
+data/context_store
+data/eval_reports
+data/harness
+data/observability
+data/*.sqlite
+frontend/dist
+frontend/README.md
 **/__pycache__
 **/*.pyc
 **/temp

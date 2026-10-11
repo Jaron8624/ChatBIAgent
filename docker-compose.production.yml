@@ -31,3 +31,10 @@ services:
       NEXUSMIND_ENV: production
       NEXUSMIND_SCHEMA_BOOTSTRAP: "false"
       Token: ${MILVUS_APP_TOKEN:?Create a scoped Milvus user and set its token}
+  migrate:
+    environment:
+      NEXUSMIND_ENV: production
+      DEMO_DATA_ENABLED: "false"
+  frontend:
+    ports: !override
+      - "127.0.0.1:5173:80"

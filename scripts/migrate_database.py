@@ -11,6 +11,12 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 async def main():
     load_dotenv(ROOT / ".env")
+    if os.getenv("SESSION_PERSISTENCE_REQUIRED", "true").lower() not in {"0", "false", "no"}:
+        from cryptography.fernet import Fernet
+        key = os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "")
+        if not key:
+            raise RuntimeError("GRAPH_CHECKPOINT_FERNET_KEY required before migration")
+        Fernet(key.encode("ascii"))
     os.environ["NEXUSMIND_SCHEMA_BOOTSTRAP"] = "true"
     os.environ.setdefault("HARNESS_DATABASE_URL", os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://", 1))
     from infra.postgresql_client import get_postgresql_client
@@ -31,6 +37,9 @@ async def main():
         else:
             checkpoint_status = "skipped_missing_key"
         print(f"migration_version=2 database_and_harness=passed checkpoint_schema={checkpoint_status} additive_only=true")
+        if os.getenv("DEMO_DATA_ENABLED", "false").lower() == "true":
+            from prepare_test_data import main as prepare_demo
+            await asyncio.to_thread(prepare_demo)
     finally:
         if pg is not None:
             await pg.close()
