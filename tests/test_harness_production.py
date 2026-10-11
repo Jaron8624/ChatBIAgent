@@ -50,8 +50,8 @@ class HarnessProductionTests(unittest.TestCase):
         self.store.transition_candidate(candidate.candidate_id, CandidateStatus.EVALUATED, "harness", "passed")
         decision = GateEngine(GatePolicy(required_metrics=[])).decide(
             "exp-release", candidate.candidate_id,
-            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}},
-            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}},
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}, "suite_rates": {"security": 1.0}},
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}, "suite_rates": {"security": 1.0}},
         )
         self.store.save_gate_decision(decision)
         controller = ReleaseController(self.store)
@@ -169,8 +169,8 @@ class HarnessProductionTests(unittest.TestCase):
         self.store.transition_candidate(candidate.candidate_id, CandidateStatus.EVALUATED, "harness", "passed")
         decision = GateEngine(GatePolicy(required_metrics=[])).decide(
             "runtime-exp", candidate.candidate_id,
-            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}},
-            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}},
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}, "suite_rates": {"security": 1.0}},
+            {"case_count": 1, "case_pass_rate": 1.0, "protected_pass_rate": 1.0, "infra_errors": 0, "metrics": {"safety": 1.0}, "suite_rates": {"security": 1.0}},
         )
         self.store.save_gate_decision(decision)
         controller = ReleaseController(self.store)

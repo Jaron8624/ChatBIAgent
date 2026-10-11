@@ -168,6 +168,7 @@ class HarnessStoreTests(unittest.TestCase):
                 "requires_human": False,
             },
             protected=True,
+            suite="security",
         )])
         candidate = CandidateSpec.build(
             kind="evolution_rule",

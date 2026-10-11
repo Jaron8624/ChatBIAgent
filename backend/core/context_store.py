@@ -59,6 +59,14 @@ def context_identity(user_id: int, tenant_id: str, session_id: str):
         _request_identity.reset(token)
 
 
+def require_tool_identity() -> tuple[int, str, str]:
+    """Private tools must use the server-bound request, not model arguments."""
+    identity = _request_identity.get()
+    if identity is None or identity[0] <= 0:
+        raise PermissionError("私有工具需要服务端认证身份")
+    return identity
+
+
 def _cipher() -> Fernet:
     key = os.getenv("CONTEXT_STORE_FERNET_KEY", "").strip()
     if not key:

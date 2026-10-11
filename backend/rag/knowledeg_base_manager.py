@@ -9,6 +9,21 @@ from pymilvus import AnnSearchRequest, RRFRanker
 import logging
 from langgraph.config import get_stream_writer
 import time
+import json
+
+
+def _scope_filter(knowledge_base_id: str, user_id: int, file_hash: str = None) -> str:
+    """Encode untrusted values as literals; never splice them as expressions."""
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+        raise ValueError("user_id 必须是有效的已认证用户 ID")
+    if not isinstance(knowledge_base_id, str) or not knowledge_base_id:
+        raise ValueError("知识库 ID 不能为空")
+    expression = f"knowledge_base_id == {json.dumps(knowledge_base_id, ensure_ascii=False)} and user_id == {user_id}"
+    if file_hash is not None:
+        if not isinstance(file_hash, str) or not file_hash:
+            raise ValueError("文件哈希不能为空")
+        expression += f" and file_hash == {json.dumps(file_hash, ensure_ascii=False)}"
+    return expression
 
 
 logger = logging.getLogger(__name__)
@@ -213,12 +228,16 @@ class KnowledgeBaseManager:
         """混合检索，返回去重后的父块 ID 列表，混合检索失败时自动降级为稠密向量检索"""
         
         # 构建过滤表达式
+        scoped = _scope_filter(knowledge_base_id, user_id)
         if knowledge_base_id == "默认知识库":
             filter_expr = f"user_id == {user_id}"
         else:
-            filter_expr = f'knowledge_base_id == "{knowledge_base_id}" and user_id == {user_id}'
+            filter_expr = scoped
         
-        writer = get_stream_writer()
+        try:
+            writer = get_stream_writer()
+        except RuntimeError:
+            writer = lambda _: None  # Retrieval is also used outside LangGraph.
         writer("正在准备查询向量嵌入...")
         start_time = time.time()
         # 生成稠密向量，带重试机制
@@ -303,16 +322,14 @@ class KnowledgeBaseManager:
         返回删除的子块数量
         """
         try:
-            filter_condition = (
-                f'knowledge_base_id == "{knowledge_base_id}" and user_id == {user_id}'
-            )
+            filter_condition = _scope_filter(knowledge_base_id, user_id)
             result = await self.client.delete(
                 collection_name=self.collection_name, filter=filter_condition
             )
             print(f"删除知识库的结果：{result}")
-            deleted_count = (
-                result["delete_count"] if hasattr(result, "delete_count") else 0
-            )
+            deleted_count = (result if isinstance(result, int) else
+                result.get("delete_count", 0) if isinstance(result, dict) else
+                getattr(result, "delete_count", 0))
             logger.info(
                 f"从 Milvus 删除知识库 {knowledge_base_id}（用户 {user_id}）的所有文件子块"
             )
@@ -328,7 +345,7 @@ class KnowledgeBaseManager:
     ) -> int:
         """删除指定文件的所有子块（只负责 Milvus 数据删除）"""
         try:
-            filter = f'knowledge_base_id == "{knowledge_base_id}" and file_hash == "{file_hash}" and user_id == {user_id}'
+            filter = _scope_filter(knowledge_base_id, user_id, file_hash)
 
             result = await self.client.delete(
                 collection_name=self.collection_name, filter=filter

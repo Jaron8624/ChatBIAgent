@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Protocol
+from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from .models import EvalCase, EvaluationStatus, EvaluatorKind, ExecutionResult, Score
 

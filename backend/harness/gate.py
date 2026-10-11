@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import math
 
 from .models import GateDecision, GateDecisionType, GatePolicy, new_id
 
@@ -23,6 +24,42 @@ class GateEngine:
         reasons: List[str] = []
         deltas: Dict[str, float] = {}
 
+        # NaN compares false in both directions and used to bypass every
+        # threshold. Reject malformed evidence before computing any deltas.
+        for role, summary in (("baseline", baseline), ("candidate", candidate)):
+            if not isinstance(summary, dict):
+                reasons.append(f"{role} summary must be an object")
+                continue
+            for field in ("case_count", "infra_errors"):
+                value = summary.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    reasons.append(f"{role} invalid or missing {field}")
+            groups = [("summary", {key: summary[key] for key in
+                ("case_pass_rate", "protected_pass_rate", "holdout_pass_rate", "p95_latency_ms", "avg_cost")
+                if summary.get(key) is not None})]
+            for field in ("metrics", "suite_rates"):
+                group = summary.get(field, {})
+                if not isinstance(group, dict):
+                    reasons.append(f"{role} {field} must be an object")
+                else:
+                    groups.append((field, group))
+            for group, values in groups:
+                for field, value in values.items():
+                    try:
+                        numeric = float(value)
+                        valid = not isinstance(value, bool) and math.isfinite(numeric) and numeric >= 0
+                        if group == "suite_rates" or field.endswith("pass_rate"):
+                            valid = valid and numeric <= 1
+                    except (ValueError, TypeError, OverflowError):
+                        valid = False
+                    if not valid:
+                        reasons.append(f"{role} invalid numeric evidence {group}.{field}")
+        if reasons:
+            return GateDecision(decision_id=new_id("gate"), experiment_id=experiment_id,
+                candidate_id=candidate_id, decision=GateDecisionType.REJECT,
+                policy_version=self.policy.version, passed=False, reasons=reasons,
+                baseline_summary=baseline, candidate_summary=candidate, deltas={})
+
         if int(baseline.get("infra_errors", 0)) > 0:
             reasons.append(f"baseline has {baseline.get('infra_errors')} infrastructure errors")
         if int(candidate.get("case_count", 0)) < self.policy.min_cases:
@@ -39,25 +76,23 @@ class GateEngine:
         if float(candidate.get("protected_pass_rate", 0.0)) < self.policy.require_protected_pass_rate:
             reasons.append(
                 "protected pass rate "
-                f"{candidate.get('protected_pass_rate', 0.0):.4f} < {self.policy.require_protected_pass_rate:.4f}"
+                f"{float(candidate.get('protected_pass_rate', 0.0)):.4f} < {self.policy.require_protected_pass_rate:.4f}"
             )
         if float(candidate.get("metrics", {}).get("safety", 0.0)) < self.policy.require_safety_pass_rate:
             reasons.append(
                 "safety pass rate "
-                f"{candidate.get('metrics', {}).get('safety', 0.0):.4f} < {self.policy.require_safety_pass_rate:.4f}"
+                f"{float(candidate.get('metrics', {}).get('safety', 0.0)):.4f} < {self.policy.require_safety_pass_rate:.4f}"
             )
         candidate_suites = candidate.get("suite_rates") or {}
         for suite, threshold in self.policy.required_suite_pass_rates.items():
             if suite not in candidate_suites:
-                # Older hand-built summaries do not have suite data.  The
-                # persisted runner always emits it, so compatibility callers
-                # keep their old behaviour while real experiments fail closed.
-                if suite in (candidate.get("suite_counts") or {}):
-                    reasons.append(f"required suite is missing from comparison: {suite}")
+                reasons.append(f"required suite is missing from comparison: {suite}")
                 continue
             actual = float(candidate_suites.get(suite, 0.0))
             if actual < float(threshold):
                 reasons.append(f"suite {suite} pass rate {actual:.4f} < {float(threshold):.4f}")
+        if self.policy.require_holdout_pass_rate is not None and not candidate.get("holdout_case_count", 0):
+            reasons.append("required holdout evaluation is missing")
         if self.policy.require_holdout_pass_rate is not None and candidate.get("holdout_case_count", 0):
             holdout = float(candidate.get("holdout_pass_rate") or 0.0)
             if holdout < float(self.policy.require_holdout_pass_rate):
@@ -67,11 +102,16 @@ class GateEngine:
         if self.policy.require_usage_metrics:
             if not baseline.get("usage_available") or not candidate.get("usage_available"):
                 reasons.append("token/cost usage metrics are unavailable for baseline or candidate")
+            if baseline.get("avg_cost") is None or candidate.get("avg_cost") is None:
+                reasons.append("cost evidence is missing despite usage availability flag")
 
         baseline_metrics = baseline.get("metrics", {})
         candidate_metrics = candidate.get("metrics", {})
         for metric in self.policy.required_metrics:
             if metric == "case_pass_rate":
+                if metric not in baseline or metric not in candidate:
+                    reasons.append(f"required metric is missing from comparison: {metric}")
+                    continue
                 baseline_value = float(baseline.get("case_pass_rate", 0.0))
                 candidate_value = float(candidate.get("case_pass_rate", 0.0))
             else:

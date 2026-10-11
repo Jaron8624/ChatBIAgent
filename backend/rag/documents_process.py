@@ -8,7 +8,7 @@ import asyncio
 from langchain_community.document_loaders import Docx2txtLoader, PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rag.milvus_client import get_milvus_client
-import infra.config
+from infra import config
 from typing import List, Dict, Set
 import os
 from urllib.parse import unquote
@@ -55,7 +55,7 @@ class DocumentProcessor:
             separators=config.separators,
         )
         self.temp_dir = os.getenv("TEMP_DIR", "/tmp")
-        self.hash_storage = hash_storage
+        self.hash_storage = hash_storage if hash_storage is not None else HashStorage()
         # 修改：不再直接创建实例，延迟初始化
         self._milvus_client = None
 
@@ -101,11 +101,11 @@ class DocumentProcessor:
             """在一个线程中完成所有同步操作"""
             documents = loader.load()
             if not documents:
-                return None, None
+                return [], []
 
             parent_chunks = self.parent_splitter.split_documents(documents)
             if not parent_chunks:
-                return None, None
+                return [], []
 
             parent_data_list = []
             all_child_items = []  
@@ -156,7 +156,7 @@ class DocumentProcessor:
 
         if not parent_data_list:
             logger.warning(f"文件 {filename} 加载或分割后无内容")
-            return
+            raise ValueError(f"文件 {filename} 未解析出有效文本，不能标记为上传成功")
 
         # ========== 1. 先添加文件元数据（必须在所有外键引用之前） ==========
         await self.hash_storage.add_file_hash(
@@ -185,6 +185,7 @@ class DocumentProcessor:
 
             new_child_items.append(child_chunk)
             new_hashes.append(child_hash)
+            existing_hashes.add(child_hash)
 
         # ========== 4-6. 并行执行独立的数据库操作 ==========
         # 注意：批量添加新哈希依赖文件元数据（已存在），可以与 Milvus 和 PostgreSQL 并行

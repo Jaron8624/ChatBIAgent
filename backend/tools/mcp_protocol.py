@@ -13,6 +13,10 @@ MCP (Model Context Protocol) 工具协议实现
 
 import os
 import json
+import inspect
+import time
+from contextvars import ContextVar
+from jsonschema import validate as validate_json_schema
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Callable
@@ -106,11 +110,27 @@ class MCPToolServer:
             }
 
         try:
+            if name in {"search_knowledge_base", "get_memory"}:
+                from core.context_store import require_tool_identity
+                owner, tenant, _ = require_tool_identity()
+                arguments = dict(arguments)
+                arguments.update(user_id=owner, tenant_id=tenant)
+            validate_json_schema(arguments, tool.input_schema)
             # 调用真实 handler
             if asyncio.iscoroutinefunction(tool.handler):
                 result = await tool.handler(**arguments)
             else:
                 result = tool.handler(**arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+
+            structured = result
+            if isinstance(result, str):
+                try:
+                    structured = json.loads(result)
+                except (ValueError, TypeError):
+                    structured = None
+            is_error = isinstance(structured, dict) and bool(structured.get("error"))
 
             self._call_log.append({
                 "tool": name,
@@ -121,6 +141,7 @@ class MCPToolServer:
             return {
                 "jsonrpc": "2.0",
                 "result": {
+                    "isError": is_error,
                     "content": [
                         {"type": "text", "text": str(result) if result is not None else ""}
                     ]
@@ -166,6 +187,8 @@ class MCPToolClient:
                 raise Exception(result["error"]["message"])
             contents = result.get("result", {}).get("content", [])
             texts = [c.get("text", "") for c in contents if c.get("type") == "text"]
+            if result.get("result", {}).get("isError"):
+                raise RuntimeError("\n".join(texts))
             return "\n".join(texts)
         raise Exception("No MCP server connected")
 
@@ -269,7 +292,16 @@ class MCPToolRouter:
         self.client = MCPToolClient()
         self.client.connect_local(server)
         self.reranker = LLMReranker()
-        self.last_tool_events: List[Dict[str, Any]] = []
+        self._events = ContextVar(f"mcp_events_{id(self)}", default=None)
+
+    @property
+    def last_tool_events(self) -> List[Dict[str, Any]]:
+        value = self._events.get()
+        return value if value is not None else []
+
+    @last_tool_events.setter
+    def last_tool_events(self, value):
+        self._events.set(value)
 
     async def route_and_execute(
         self,
@@ -300,6 +332,7 @@ class MCPToolRouter:
                 description=t["description"],
                 input_schema=t.get("inputSchema", {}),
                 category=t.get("category", "general"),
+                side_effect=t.get("side_effect", "unknown"),
             )
             for t in tools_data
         ]
@@ -314,6 +347,7 @@ class MCPToolRouter:
         results = []
         self.last_tool_events = []
         for tool in top_tools:
+            call_started = time.perf_counter()
             try:
                 # 构建参数：从 query 中智能推断参数值
                 schema = tool.input_schema
@@ -351,9 +385,9 @@ class MCPToolRouter:
                     "tool_type": "business" if tool.category not in {"retrieval", "memory", "schema", "schema_retrieval", "knowledge"} else "internal",
                     "arguments": args,
                     "status": "success",
-                    "duration_ms": 0,
+                    "duration_ms": round((time.perf_counter() - call_started) * 1000, 3),
                     "result_summary": str(result)[:240],
-                    "side_effect": "read_only",
+                    "side_effect": tool.side_effect,
                 })
                 logger.info(f"MCP 工具执行成功: {tool.name}")
             except Exception as e:
@@ -364,9 +398,9 @@ class MCPToolRouter:
                     "tool_type": "business" if tool.category not in {"retrieval", "memory", "schema", "schema_retrieval", "knowledge"} else "internal",
                     "arguments": args,
                     "status": "error",
-                    "duration_ms": 0,
+                    "duration_ms": round((time.perf_counter() - call_started) * 1000, 3),
                     "result_summary": str(e)[:240],
-                    "side_effect": "read_only",
+                    "side_effect": tool.side_effect,
                 })
 
         return results

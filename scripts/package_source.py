@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--audit-report", type=Path)
+    parser.add_argument("--rag-report", type=Path)
     args = parser.parse_args()
     report_path = args.report.resolve()
     report_path.relative_to(ROOT / "artifacts" / "session_runtime")
@@ -29,6 +31,20 @@ def main():
     for name, expected in report["source_hashes"].items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise RuntimeError("Runtime report source does not match delivery: " + name)
+    extra_reports = {}
+    for label, value, directory in (("module-audit", args.audit_report, "module_audit"),
+                                    ("rag-filter-runtime", args.rag_report, "rag_filter_runtime")):
+        if value is None:
+            continue
+        path = value.resolve()
+        path.relative_to(ROOT / "artifacts" / directory)
+        extra = json.loads(path.read_text(encoding="utf-8"))
+        if extra.get("status") != "passed" or not all(c["passed"] for c in extra["checks"]):
+            raise RuntimeError("Cannot ship failed report: " + label)
+        for name, expected in extra["source_hashes"].items():
+            if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
+                raise RuntimeError("Audit report source does not match delivery: " + name)
+        extra_reports[label] = path.read_bytes()
     files = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode("utf-8").split("\0")
     files = [f for f in files if f]
     forbidden = {"artifacts", "docker-data", "node_modules", ".git", ".venv", ".venv-memory-check"}
@@ -48,6 +64,8 @@ def main():
                 "runtime_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
                 "source_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()},
                 "excluded": [".env", "Git metadata", "virtual environments", "runtime data", "private credentials"]}
+    manifest["additional_report_sha256"] = {label: hashlib.sha256(data).hexdigest()
+        for label, data in extra_reports.items()}
     folder = ROOT / "artifacts" / "deliveries"
     folder.mkdir(parents=True, exist_ok=True)
     archive_path = folder / f"NexusMind-source-20261011-{sha[:8]}.zip"
@@ -56,6 +74,8 @@ def main():
             archive.writestr("NexusMind/" + name, data)
         archive.writestr("NexusMind/DELIVERY-MANIFEST.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         archive.writestr("NexusMind/verification/session-runtime-report.json", report_path.read_bytes())
+        for label, data in extra_reports.items():
+            archive.writestr("NexusMind/verification/" + label + "-report.json", data)
     with zipfile.ZipFile(archive_path) as archive:
         if archive.testzip() is not None:
             raise RuntimeError("Archive integrity check failed")

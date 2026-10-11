@@ -260,7 +260,7 @@ def apply_refund(order_id: str, reason: str) -> str:
             "refund": refund_record,
         }, ensure_ascii=False)
 
-    return json.dumps({"error": f"订单状态 {status} 不支持退款"}, ensure_ascii=False)
+    return json.dumps({"error": f"订单状态 {order['status']} 不支持退款"}, ensure_ascii=False)
 
 
 def query_coupon(user_id: int) -> str:

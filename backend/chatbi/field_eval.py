@@ -12,11 +12,14 @@ Bad Case 闭环：失败用例记录到 JSONL → 用增强流水线（三级 Sc
 import json
 import os
 import time
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.sql_executor import execute_sql as _execute_sql_raw
+
+logger = logging.getLogger(__name__)
 
 
 def execute_sql(sql: str) -> Dict[str, Any]:
