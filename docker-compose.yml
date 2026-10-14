@@ -130,6 +130,7 @@ services:
       MAINTENANCE_ENABLED: "false"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
       CONTEXT_STORE_DIR: /app/runtime/context_store
+      MEMORY_FILES_ROOT: /app/runtime/memory_files
       EVOLUTION_DIR: /app/runtime/evolution
     volumes:
       - nexusmind_uploads:/app/data/uploads
@@ -169,6 +170,7 @@ services:
       MAINTENANCE_ENABLED: "true"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
       CONTEXT_STORE_DIR: /app/runtime/context_store
+      MEMORY_FILES_ROOT: /app/runtime/memory_files
       EVOLUTION_DIR: /app/runtime/evolution
       WORKER_HEALTH_FILE: /tmp/nexusmind-worker-health
     volumes:

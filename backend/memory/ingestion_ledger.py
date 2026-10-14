@@ -59,9 +59,16 @@ class IngestionLedger:
         if row is None:
             return None
         payload = row["payload"]
-        return row["batch_id"], json.loads(payload) if isinstance(payload, str) else payload
+        payload = json.loads(payload) if isinstance(payload, str) else payload
+        if "encrypted_managed" in payload:
+            from memory.managed_store import decrypt
+            payload = decrypt(payload["encrypted_managed"].encode("ascii"))
+        return row["batch_id"], payload
 
     async def prepare(self, batch, user_id, tenant_id, thread_id, payload):
+        if payload.get("pipeline") == "managed_v1":
+            from memory.managed_store import encrypt
+            payload = {"encrypted_managed": encrypt(payload).decode("ascii")}
         await self.conn.execute("""
             INSERT INTO nexusmind_memory_batches(batch_id,user_id,tenant_id,thread_id,status,payload)
             VALUES($1,$2,$3,$4,'prepared',$5::jsonb) ON CONFLICT(batch_id) DO NOTHING

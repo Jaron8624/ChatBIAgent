@@ -33,17 +33,40 @@ logger = logging.getLogger(__name__)
 async def check_and_store_memory():
     """检查并提取存在psql中的消息"""
     summarize_model = create_chat_model(
-        model_name=os.getenv("SUMMARIZATION_MODEL", "qwen-turbo"),
+        model_name=os.getenv("SUMMARIZATION_MODEL") or os.getenv("AGENT_BASE_MODEL", "qwen-plus"),
         temperature=0.6,
     )
     while True:
         try:
+            from memory.consolidation import extraction_event
+            extraction_event().clear()
             async with maintenance_leader("memory-extraction") as leader:
                 if leader:
                     await run_compression_task(model=summarize_model)
         except Exception as e:
             logger.error(f"记忆存储任务失败: {e}")
-        await asyncio.sleep(180)
+        try:
+            await asyncio.wait_for(extraction_event().wait(), timeout=180)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def consolidate_long_term_memory():
+    from memory.consolidation import enabled, run_memory_maintenance
+    model = create_chat_model(model_name=os.getenv("AGENT_BASE_MODEL", "qwen-plus"), temperature=0)
+    while True:
+        if enabled():
+            try:
+                async with maintenance_leader("memory-consolidation") as leader:
+                    if leader:
+                        from infra.postgresql_client import get_postgresql_client
+                        pg = await get_postgresql_client()
+                        result = await run_memory_maintenance(pg.pool, model)
+                        if result["failed"]:
+                            logger.warning("部分分层记忆整理失败，后续周期会重试")
+            except Exception:
+                logger.exception("分层记忆整理失败")
+        await asyncio.sleep(int(os.getenv("MEMORY_CONSOLIDATION_INTERVAL_SECONDS", "1800")))
 
 
 async def prune_graph_checkpoints():
@@ -155,6 +178,9 @@ async def lifespan(app: FastAPI):
         maintenance_enabled = os.getenv("MAINTENANCE_ENABLED", "true").lower() == "true"
         if maintenance_enabled:
             task = asyncio.create_task(check_and_store_memory())
+            consolidation_task = asyncio.create_task(consolidate_long_term_memory())
+            background_tasks.add(consolidation_task)
+            consolidation_task.add_done_callback(background_tasks.discard)
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
 

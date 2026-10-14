@@ -19,18 +19,22 @@ def main():
     primary = parser.add_mutually_exclusive_group(required=True)
     primary.add_argument("--report", type=Path, help="Verified session runtime report")
     primary.add_argument("--context-report", type=Path, help="Verified real-model context compaction report")
+    primary.add_argument("--memory-report", type=Path, help="Verified managed memory integration report")
     parser.add_argument("--audit-report", type=Path)
     parser.add_argument("--rag-report", type=Path)
     parser.add_argument("--knowledge-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--deployment-report", type=Path)
     args = parser.parse_args()
-    kind = "context-compaction" if args.context_report else "session-runtime"
-    report_path = (args.context_report or args.report).resolve()
-    report_path.relative_to(ROOT / "artifacts" / ("context_compaction" if args.context_report else "session_runtime"))
+    kind = "managed-memory" if args.memory_report else ("context-compaction" if args.context_report else "session-runtime")
+    report_path = (args.memory_report or args.context_report or args.report).resolve()
+    directory = "managed_memory" if args.memory_report else ("context_compaction" if args.context_report else "session_runtime")
+    report_path.relative_to(ROOT / "artifacts" / directory)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("status") != "passed" or not report.get("source_hashes"):
         raise RuntimeError("Cannot ship a failed runtime report")
+    if args.memory_report and (not report.get("model_calls") or not report.get("embedding_dimension")):
+        raise RuntimeError("Memory report lacks real model and embedding verification")
     if args.context_report:
         checks = [report.get(name) is True for name in
                   ("archived_exactly", "actual_recall_tool_called", "cross_user_denied")]

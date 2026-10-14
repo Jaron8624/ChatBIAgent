@@ -483,6 +483,8 @@ class Orchestrator:
         ))
 
         # 注册 SQL 数据分析工具集（ChatBI：schema 查询 + SQL 执行）
+        from memory.store_api import register_memory_store_tools
+        register_memory_store_tools(self.mcp_server)
         try:
             from tools.sql_executor import register_sql_tools
             register_sql_tools(self.mcp_server)
@@ -716,6 +718,8 @@ class Orchestrator:
                     query=query,
                     answer=answer,
                 )
+                from memory.consolidation import signal_extraction
+                signal_extraction()
                 # If deletion began while the insert was in flight, finish by
                 # removing these rows as well. The write is idempotent by run_id.
                 if await session_mgr.is_session_deleted(session_id, user_id, tenant_id):
@@ -1727,6 +1731,7 @@ class Orchestrator:
         messages: Optional[List[Dict]] = None,
         on_event=None,
         tenant_id: str = "",
+        memory_sources: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """
         入口：执行多 Agent 编排流程（集成 Skills + Session 恢复）
@@ -1806,6 +1811,10 @@ class Orchestrator:
         # Keep original text separate from the compressed model window. Neither
         # injected memories nor tool traces can overwrite the durable transcript.
         canonical_messages = self._conversation_messages(messages)
+        if memory_sources is not None:
+            from memory.managed_store import get_managed_memory
+            managed_memory = await get_managed_memory()
+            await managed_memory.bind(user_id, tenant_id, resumed_sid, memory_sources)
         previous_evidence = ((snapshot.state.get("last_execution_evidence") or {}).get("react_result") or {}).get("tool_calls", []) if snapshot else []
         messages = [dict(message) for message in (messages or [])]
 
@@ -1833,12 +1842,24 @@ class Orchestrator:
         if user_id > 0:
             try:
                 from memory.context_loader import load_memory_context
-                from rag.milvus_client import get_milvus_client
-                memory_client = await get_milvus_client()
-                mem_result = await load_memory_context(
-                    memory_client.memory_manager, query, user_id, tenant_id,
-                    token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")),
-                )
+                from memory.consolidation import enabled as managed_memory_enabled
+                mem_result = ""
+                if managed_memory_enabled():
+                    try:
+                        from memory.managed_store import get_managed_memory
+                        managed = await get_managed_memory()
+                        layered = await managed.context(user_id, tenant_id, resumed_sid, query,
+                            token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
+                        if layered:
+                            mem_result = layered
+                    except Exception:
+                        logger.warning("分层记忆读取失败，保留原记忆读取结果", exc_info=True)
+                if not mem_result:
+                    from rag.milvus_client import get_milvus_client
+                    memory_client = await get_milvus_client()
+                    mem_result = await load_memory_context(
+                        memory_client.memory_manager, query, user_id, tenant_id,
+                        token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
                 if mem_result:
                     # 把记忆作为 system context 注入到 messages 开头
                     memory_msg = {

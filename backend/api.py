@@ -547,6 +547,7 @@ async def chat_orchestrate(
                     knowledge_base_id=knowledge_base_id,
                     messages=messages,
                     tenant_id=tenant_id,
+                    memory_sources=body.get("memory_sources"),
                 )
             usage = tracker.snapshot()
             if usage["calls"] == 0 and result.get("usage_available"):
@@ -645,6 +646,7 @@ async def chat_orchestrate_stream(
                             messages=messages,
                             on_event=on_event,
                             tenant_id=tenant_id,
+                            memory_sources=body.get("memory_sources"),
                         )
                     usage = tracker.snapshot()
                     if usage["calls"] == 0 and result.get("usage_available"):
@@ -1707,6 +1709,10 @@ async def require_memory_identity(request: Request):
     if identity["user_id"] <= 0:
         raise HTTPException(status_code=401, detail="管理个人记忆需要登录")
     return identity
+
+
+from memory.store_api import register_memory_store_api
+register_memory_store_api(router, require_memory_identity)
 
 
 @router.get("/memory")

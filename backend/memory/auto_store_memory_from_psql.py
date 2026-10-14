@@ -165,7 +165,8 @@ async def get_unsunmarized_conversations(
                 AND thread_id = $2
                 AND tenant_id = $3
                 AND (summary_id IS NULL OR summary_id = '')
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, turn_id, CASE WHEN role IN ('human','user') THEN 0 ELSE 1 END, id
+                LIMIT 40
             """,
                 user_id,
                 thread_id,
@@ -201,6 +202,9 @@ async def extract_and_append_memory(
         async with memory_write_lock(pg_client.pool, user_id, tenant_id) as conn:
             ledger = IngestionLedger(conn)
             await ledger.ensure_schema()
+            from memory.consolidation import enabled as managed_enabled
+            if managed_enabled():
+                return await _managed_extract_locked(pg_client, ledger, model, user_id, tenant_id, thread_id)
             from memory.management import MutationJournal
             milvus = await get_milvus_client()
             journal = MutationJournal(conn, getattr(milvus, "memory_manager", milvus))
@@ -356,6 +360,65 @@ async def _deliver_batch(batch, payload, ledger, pg):
         "token_count": payload["token_count"], "message_count": payload["message_count"],
         "updated_message_count": len(payload["message_ids"]),
     }
+
+
+async def _managed_extract_locked(pg, ledger, model, user_id, tenant_id, thread_id):
+    """Independent PG-backed ingestion; no Milvus write or legacy global projection.
+
+    The target source and extracted payload are frozen before delivery. This keeps
+    project facts out of the old per-user index and makes crash retries stable.
+    """
+    from memory.managed_store import ManagedMemory
+    from memory.consolidation import ingest_topics
+    if not await ledger.active(user_id, tenant_id, thread_id):
+        await ledger.cancel_session(user_id, tenant_id, thread_id)
+        return {"success": False, "reason": "会话已删除或归属不匹配"}
+    pending = await ledger.pending(user_id, tenant_id)
+    if pending and pending[1].get("pipeline") != "managed_v1":
+        return await _deliver_batch(pending[0], pending[1], ledger, pg)
+    if pending:
+        batch, payload = pending
+    else:
+        messages = await get_unsunmarized_conversations(user_id, thread_id, tenant_id)
+        tokens = count_tokens_approximately([HumanMessage(content="\n".join(m["content"] for m in messages))])
+        if not messages or not should_extract(messages, tokens, TOKEN_THRESHOLD, int(os.getenv("MEMORY_EXTRACT_IDLE_SECONDS", "900"))):
+            return {"success": False, "reason": "等待更多对话或提取触发条件"}
+        service = ManagedMemory(pg.pool)
+        async with pg.pool.acquire() as conn:
+            # Use even revoked bindings to avoid silently reclassifying project
+            # conversations into the personal store after a grant is revoked.
+            bound = await conn.fetch("SELECT * FROM memory_source_bindings WHERE tenant=$1 AND user_id=$2 AND session_id=$3", tenant_id, user_id, thread_id)
+        target = next((r["store_id"] for r in bound if r["access"] == "write"), None)
+        if not bound:
+            target = (await service.create_store(user_id, tenant_id, ""))["id"]
+        attributes = []
+        if target:
+            async with pg.pool.acquire() as conn:
+                await service.authorize_runtime(conn, target, user_id, tenant_id, thread_id, write=True)
+                rows = await conn.fetch("SELECT topic FROM memory_units WHERE store_id=$1 AND level=1 AND status='active' LIMIT 512", target)
+                attributes = [{"memory_key": r["topic"]} for r in rows]
+        extracted = await extract_memories(messages, model, attributes)
+        excluded = set(extracted.get("filtered_message_ids", []))
+        memories = {kind: [i for i in extracted.get(kind, []) if not excluded.intersection(i.get("source_message_ids", []))]
+                    for kind in ("semantic_memory", "episodic_memory", "procedural_memory")}
+        batch = batch_id(user_id, tenant_id, thread_id, messages)
+        payload = {"pipeline": "managed_v1", "user_id": user_id, "tenant_id": tenant_id,
+                   "thread_id": thread_id, "message_ids": [m["id"] for m in messages], "memories": memories,
+                   "managed_store_id": target, "summary_id": str(uuid.uuid5(uuid.NAMESPACE_URL, batch)),
+                   "profile": "", "token_count": tokens, "message_count": len(messages)}
+        await ledger.prepare(batch, user_id, tenant_id, thread_id, payload)
+    try:
+        if not await ledger.active(payload["user_id"], payload["tenant_id"], payload["thread_id"]):
+            await ledger.cancel_session(payload["user_id"], payload["tenant_id"], payload["thread_id"])
+            return {"success": False, "reason": "会话已删除"}
+        written = await ingest_topics(pg.pool, batch, payload)
+        await ledger.acknowledge(batch, payload["user_id"], payload["tenant_id"], payload["thread_id"],
+            payload["message_ids"], payload["summary_id"], "")
+    except Exception as exc:
+        await ledger.failed(batch, exc)
+        raise
+    return {"success": True, "batch_id": batch, "managed_units": len(written),
+            "updated_message_count": len(payload["message_ids"]), "token_count": payload["token_count"]}
 
 
 async def process_all_users_conversations(

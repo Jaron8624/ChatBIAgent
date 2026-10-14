@@ -16,6 +16,7 @@ data/harness/*.db-*
 data/eval_reports/
 data/*.sqlite
 data/context_store/
+data/memory_files/
 data/observability/
 docker-data/
 backend/evolution/skills/

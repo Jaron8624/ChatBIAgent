@@ -157,7 +157,7 @@ class PostgreSQLParentClient:
                         if not await conn.fetchval("SELECT to_regclass('nexusmind_schema_versions')"):
                             raise RuntimeError("run_explicit_database_migration_first")
                         version = await conn.fetchval("SELECT max(version) FROM nexusmind_schema_versions")
-                        if version != 2:
+                        if version != 3:
                             raise RuntimeError("database_schema_version_mismatch")
                         self._pool_initialized = True
                         return
@@ -284,9 +284,11 @@ class PostgreSQLParentClient:
                     await conn.execute(JOB_DDL)
                     from rag.index_contract import DDL as INDEX_DDL
                     await conn.execute(INDEX_DDL)
+                    from memory.managed_store import DDL as MEMORY_DDL
+                    await conn.execute(MEMORY_DDL)
                     await conn.execute("""CREATE TABLE IF NOT EXISTS nexusmind_schema_versions (
                         version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
-                        INSERT INTO nexusmind_schema_versions(version) VALUES(2) ON CONFLICT DO NOTHING;""")
+                        INSERT INTO nexusmind_schema_versions(version) VALUES(3) ON CONFLICT DO NOTHING;""")
 
                 self._pool_initialized = True
                 logger.info("PostgreSQL client initialized successfully")

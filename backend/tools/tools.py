@@ -95,6 +95,14 @@ async def get_memory(
     logger.info(f"{'---'*20}开始检索记忆hybrid_retrieval_memories{'---'*20}")
     logger.info(f"ai希望检索的各种记忆数量: 语义记忆{semantic_k}, 情节记忆{episodic_k}, 程序记忆{procedural_k}")
     user_id = runtime.context.user_id
+    from memory.consolidation import enabled as managed_memory_enabled
+    if managed_memory_enabled():
+        from memory.managed_store import get_managed_memory
+        managed = await get_managed_memory()
+        layered = await managed.context(user_id, runtime.context.tenant_id,
+            runtime.context.session_id, query, token_budget=1200)
+        if layered:
+            return layered
     writer = get_stream_writer()
     writer(f"🔍 正在检索记忆库...")
     start_time = time.time()
