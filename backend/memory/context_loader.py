@@ -56,3 +56,14 @@ async def load_memory_context(manager, query, user_id, tenant_id="default", toke
         except Exception:
             logger.warning("Question memory recall unavailable", exc_info=True)
     return pack_memory_context(preferences, recalled, token_budget)
+async def load_request_memory_context(query, user_id, tenant_id, session_id, token_budget=600):
+    """Choose one memory authority, never broaden scope on empty/error responses."""
+    from memory.consolidation import enabled
+    if enabled():
+        from memory.managed_store import get_managed_memory
+        service = await get_managed_memory()
+        return await service.context(user_id, tenant_id, session_id, query, token_budget=token_budget)
+    from rag.milvus_client import get_milvus_client
+    client = await get_milvus_client()
+    return await load_memory_context(client.memory_manager, query, user_id, tenant_id, token_budget=token_budget)
+

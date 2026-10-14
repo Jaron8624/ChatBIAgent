@@ -101,8 +101,7 @@ async def get_memory(
         managed = await get_managed_memory()
         layered = await managed.context(user_id, runtime.context.tenant_id,
             runtime.context.session_id, query, token_budget=1200)
-        if layered:
-            return layered
+        return layered  # Empty managed memory must not expose the legacy user-wide index.
     writer = get_stream_writer()
     writer(f"🔍 正在检索记忆库...")
     start_time = time.time()

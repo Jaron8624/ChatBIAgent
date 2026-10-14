@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from cryptography.fernet import Fernet
 
@@ -53,6 +53,24 @@ class ManagedMemoryPolicyTests(unittest.TestCase):
         self.assertEqual(cosine([1], [1, 2]), 0)
         self.assertAlmostEqual(cosine([1, 0], [1, 0]), 1)
         self.assertIn('月汇', terms('按月汇总'))
+
+
+class RequestMemoryAuthorityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_managed_result_does_not_fall_back(self):
+        from memory.context_loader import load_request_memory_context
+        service = AsyncMock()
+        service.context.return_value = ''
+        with patch.dict(os.environ, {'MANAGED_MEMORY_ENABLED': 'true'}), \
+                patch('memory.managed_store.get_managed_memory', return_value=service):
+            self.assertEqual(await load_request_memory_context('q', 1, 't', 's'), '')
+        service.context.assert_awaited_once_with(1, 't', 's', 'q', token_budget=600)
+
+    async def test_managed_failure_cannot_broaden_scope(self):
+        from memory.context_loader import load_request_memory_context
+        with patch.dict(os.environ, {'MANAGED_MEMORY_ENABLED': 'true'}), \
+                patch('memory.managed_store.get_managed_memory', side_effect=RuntimeError('outage')):
+            with self.assertRaises(RuntimeError):
+                await load_request_memory_context('q', 1, 't', 's')
 
 
 if __name__ == '__main__':

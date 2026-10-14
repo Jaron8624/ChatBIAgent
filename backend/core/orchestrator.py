@@ -1841,25 +1841,9 @@ class Orchestrator:
         # ===== 跨 Session 记忆连续性：注入用户长期记忆 =====
         if user_id > 0:
             try:
-                from memory.context_loader import load_memory_context
-                from memory.consolidation import enabled as managed_memory_enabled
-                mem_result = ""
-                if managed_memory_enabled():
-                    try:
-                        from memory.managed_store import get_managed_memory
-                        managed = await get_managed_memory()
-                        layered = await managed.context(user_id, tenant_id, resumed_sid, query,
-                            token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
-                        if layered:
-                            mem_result = layered
-                    except Exception:
-                        logger.warning("分层记忆读取失败，保留原记忆读取结果", exc_info=True)
-                if not mem_result:
-                    from rag.milvus_client import get_milvus_client
-                    memory_client = await get_milvus_client()
-                    mem_result = await load_memory_context(
-                        memory_client.memory_manager, query, user_id, tenant_id,
-                        token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
+                from memory.context_loader import load_request_memory_context
+                mem_result = await load_request_memory_context(query, user_id, tenant_id, resumed_sid,
+                    token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
                 if mem_result:
                     # 把记忆作为 system context 注入到 messages 开头
                     memory_msg = {
