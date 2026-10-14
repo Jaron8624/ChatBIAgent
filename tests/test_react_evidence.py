@@ -5,9 +5,11 @@ import json
 import os
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from cryptography.fernet import Fernet
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
@@ -193,7 +195,13 @@ class OrchestratorEvidenceTests(unittest.IsolatedAsyncioTestCase):
         graph.add_node("react", orchestrator._react_node)
         graph.add_edge(START, "react")
         graph.add_edge("react", END)
-        with patch("infra.graph_checkpointer.get_graph_checkpointer_manager", return_value=manager):
+        from core import context_store
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(context_store, "CONTEXT_STORE_DIR", Path(directory)), \
+                patch.dict(os.environ, {"CONTEXT_STORE_FERNET_KEY": Fernet.generate_key().decode()}), \
+                context_store.context_identity(11, "tenant-a", "s"), \
+                patch("infra.graph_checkpointer.get_graph_checkpointer_manager", return_value=manager):
+            context_store.ContextStore._instance = None
             result = await graph.compile().ainvoke({"query": "q", "messages": [], "session_id": "s"},
                 {"configurable": {"thread_id": "owner-bound:run:123"}})
         manager.load_session_snapshot.assert_awaited_once_with("owner-bound:run:123")

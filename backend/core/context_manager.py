@@ -121,7 +121,7 @@ class ToolResultTruncator:
             )
             recall_hint = f"，完整内容已存档 ref_id={ref_id}（可调用 recall_context 工具回忆，推荐 grep 模式按关键词取回）"
         except Exception as e:
-            logger.warning(f"ContextStore 存档失败（降级为纯截断）: {e}")
+            raise RuntimeError("完整内容无法安全存档，拒绝有损截断") from e
 
         # 占位符：说明被截断，保留行数信息 + 存档引用
         placeholder = (
@@ -152,11 +152,13 @@ class ToolResultTruncator:
             return results
 
         total_tokens = sum(self.estimate_tokens(r.get("result", "")) for r in results)
-        if total_tokens <= self.total_budget:
+        if total_tokens <= self.total_budget and all(
+            self.estimate_tokens(r.get("result", "")) <= self.single_max for r in results
+        ):
             return results
 
         # 按比例分配预算：每条工具的预算 = 总预算 / 工具数
-        per_tool_budget = self.total_budget // len(results)
+        per_tool_budget = min(self.single_max, self.total_budget // len(results))
         truncated = []
         for r in results:
             original = r.get("result", "")
@@ -177,19 +179,22 @@ class ToolResultTruncator:
         截断消息列表中的 tool_result 内容
         保留消息结构，只压缩内容部分
         """
-        total = sum(self.estimate_tokens(m.get("content", "")) for m in messages)
-        if total <= max_tokens:
-            return messages
-
-        # 对每条消息的 content 做截断
-        result = []
-        per_msg_budget = max_tokens // max(len(messages), 1)
-        for m in messages:
-            content = m.get("content", "")
-            if self.estimate_tokens(content) > per_msg_budget:
-                content = self.truncate(content, per_msg_budget)
-            result.append({**m, "content": content})
-
+        from core.context_messages import is_fixed, tool_ids, model_messages, serialize_messages
+        import copy
+        result = copy.deepcopy(messages)
+        estimate = lambda: self.estimate_tokens(serialize_messages(model_messages(result)))
+        for message in result:
+            if estimate() <= max_tokens:
+                break
+            content = message.get("content", "")
+            calls, _ = tool_ids(message)
+            if is_fixed(message) or calls or not isinstance(content, str):
+                continue
+            allowance = self.estimate_tokens(content) - (estimate() - max_tokens) - 32
+            if self.estimate_tokens(content) > 128:
+                message["content"] = self.truncate(content, max(96, allowance))
+        if estimate() > max_tokens:
+            raise ValueError("消息结构或固定提示词超过预算，拒绝破坏协议")
         return result
 
 

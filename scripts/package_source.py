@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -15,18 +16,31 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--report", required=True, type=Path)
+    primary = parser.add_mutually_exclusive_group(required=True)
+    primary.add_argument("--report", type=Path, help="Verified session runtime report")
+    primary.add_argument("--context-report", type=Path, help="Verified real-model context compaction report")
     parser.add_argument("--audit-report", type=Path)
     parser.add_argument("--rag-report", type=Path)
     parser.add_argument("--knowledge-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--deployment-report", type=Path)
     args = parser.parse_args()
-    report_path = args.report.resolve()
-    report_path.relative_to(ROOT / "artifacts" / "session_runtime")
+    kind = "context-compaction" if args.context_report else "session-runtime"
+    report_path = (args.context_report or args.report).resolve()
+    report_path.relative_to(ROOT / "artifacts" / ("context_compaction" if args.context_report else "session_runtime"))
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if report.get("status") != "passed" or not all(c["passed"] for c in report["checks"]):
+    if report.get("status") != "passed" or not report.get("source_hashes"):
         raise RuntimeError("Cannot ship a failed runtime report")
+    if args.context_report:
+        checks = [report.get(name) is True for name in
+                  ("archived_exactly", "actual_recall_tool_called", "cross_user_denied")]
+        for name in ("summary_facts", "answer_facts"):
+            facts = report.get(name, {})
+            checks.append(bool(facts) and all(value is True for value in facts.values()))
+        if not all(checks) or not report.get("model_calls"):
+            raise RuntimeError("Context report lacks successful real-model verification")
+    elif not report.get("checks") or not all(c["passed"] for c in report["checks"]):
+        raise RuntimeError("Cannot ship a failed session report")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     changed = subprocess.check_output(["git", "diff", "HEAD", "--name-only"], cwd=ROOT, text=True).strip()
     if changed:
@@ -67,6 +81,7 @@ def main():
             raise RuntimeError("Configured secret found in tracked file: " + name)
         payloads[name] = data
     manifest = {"git_commit": sha, "runtime_report_run_id": report["run_id"],
+                "runtime_report_kind": kind,
                 "runtime_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
                 "source_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()},
                 "excluded": [".env", "Git metadata", "virtual environments", "runtime data", "private credentials"]}
@@ -74,12 +89,13 @@ def main():
         for label, data in extra_reports.items()}
     folder = ROOT / "artifacts" / "deliveries"
     folder.mkdir(parents=True, exist_ok=True)
-    archive_path = folder / f"NexusMind-source-20261011-{sha[:8]}.zip"
+    release_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    archive_path = folder / f"NexusMind-source-{release_date}-{sha[:8]}.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in payloads.items():
             archive.writestr("NexusMind/" + name, data)
         archive.writestr("NexusMind/DELIVERY-MANIFEST.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-        archive.writestr("NexusMind/verification/session-runtime-report.json", report_path.read_bytes())
+        archive.writestr(f"NexusMind/verification/{kind}-report.json", report_path.read_bytes())
         for label, data in extra_reports.items():
             archive.writestr("NexusMind/verification/" + label + "-report.json", data)
     with zipfile.ZipFile(archive_path) as archive:

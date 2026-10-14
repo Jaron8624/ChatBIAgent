@@ -39,7 +39,7 @@ CONTEXT_STORE_DIR = Path(os.getenv("CONTEXT_STORE_DIR", "./data/context_store"))
 # 过期清理阈值（秒）
 EXPIRE_SECONDS = 7 * 24 * 3600
 
-# 单文件大小上限（字符），超出部分会被截断。
+# 单文件大小上限（字符）；超限拒绝写入，不把截断副本伪装成完整原文。
 MAX_CONTENT_CHARS = 2_000_000
 
 # Only the server sets this identity. It is never accepted from tool arguments.
@@ -134,7 +134,7 @@ class ContextStore:
             raise PermissionError("缺少可信请求身份，拒绝存档")
         cipher = _cipher()
         if len(content) > MAX_CONTENT_CHARS:
-            content = content[:MAX_CONTENT_CHARS] + "\n...[存储时截断]"
+            raise ValueError("内容超过归档容量上限，拒绝截断原文")
         if time.time() - self._last_cleanup > 3600:
             self._cleanup_expired()
         ref_id = f"ctx_{uuid.uuid4().hex[:20]}"
@@ -166,6 +166,7 @@ class ContextStore:
         mode: str = "full",
         pattern: str = "",
         tail_lines: int = 50,
+        offset: int = 0,
     ) -> str:
         """
         回忆接口 — 模型通过 recall_context 工具调用
@@ -175,6 +176,12 @@ class ContextStore:
         - tail:  只看末尾 N 行（最新进展）
         - grep:  按正则过滤相关行（精确定位）
         """
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset 必须是非负整数")
+        if mode not in {"full", "tail", "grep"}:
+            raise ValueError("不支持的读取模式")
+        if not isinstance(tail_lines, int) or isinstance(tail_lines, bool) or not 1 <= tail_lines <= 200:
+            raise ValueError("tail_lines 必须在 1 到 200 之间")
         path = self._path(ref_id)
         identity = _request_identity.get()
         if identity is None or identity[0] <= 0:
@@ -195,63 +202,45 @@ class ContextStore:
             raise PermissionError("无权读取此上下文")
         content = record["content"]
 
+        def page(selected, **metadata):
+            # Bounded even for a single multi-megabyte line; callers can page
+            # through the selected content using the same reference and query.
+            end = min(len(selected), offset + 4000)
+            return json.dumps({"ref_id": ref_id, "mode": mode, **metadata,
+                "content": selected[offset:end], "offset": offset,
+                "next_offset": end if end < len(selected) else None,
+                "selected_chars": len(selected)}, ensure_ascii=False)
+
         if mode == "tail":
             lines = content.split("\n")
             result = "\n".join(lines[-tail_lines:])
-            return json.dumps(
-                {
-                    "ref_id": ref_id,
-                    "mode": "tail",
-                    "total_lines": len(lines),
-                    "showing_last": min(tail_lines, len(lines)),
-                    "content": result,
-                },
-                ensure_ascii=False,
-            )
+            return page(result, total_lines=len(lines), showing_last=min(tail_lines, len(lines)))
 
         if mode == "grep":
             if not pattern:
                 return json.dumps(
                     {"error": "grep 模式必须提供 pattern 参数"}, ensure_ascii=False
                 )
+            import regex
             try:
-                matched = [
-                    f"L{i+1}: {line}"
-                    for i, line in enumerate(content.split("\n"))
-                    if re.search(pattern, line)
-                ]
-            except re.error as e:
+                if len(pattern) > 256:
+                    raise ValueError("检索表达式过长")
+                expression = regex.compile(pattern)
+                deadline = time.monotonic() + 0.2
+                matched = []
+                for i, line in enumerate(content.split("\n")):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("检索超时，请缩小查询范围或使用更简单的表达式")
+                    if expression.search(line, timeout=min(0.025, remaining)):
+                        matched.append(f"L{i+1}: {line}")
+            except (regex.error, ValueError, TimeoutError) as e:
                 return json.dumps(
                     {"error": f"非法正则: {e}"}, ensure_ascii=False
                 )
-            # 匹配行数保护：最多返回 100 行
-            truncated = len(matched) > 100
-            return json.dumps(
-                {
-                    "ref_id": ref_id,
-                    "mode": "grep",
-                    "pattern": pattern,
-                    "matched_lines": len(matched),
-                    "content": "\n".join(matched[:100]) + ("\n...[更多匹配行省略]" if truncated else ""),
-                },
-                ensure_ascii=False,
-            )
+            return page("\n".join(matched), pattern=pattern, matched_lines=len(matched))
 
-        # full 模式：长度保护
-        if len(content) > 50_000:
-            return json.dumps(
-                {
-                    "ref_id": ref_id,
-                    "mode": "full",
-                    "hint": f"内容共 {len(content)} 字符过长，建议改用 tail（看末尾）或 grep（按关键词过滤）模式",
-                    "head": content[:2000],
-                },
-                ensure_ascii=False,
-            )
-        return json.dumps(
-            {"ref_id": ref_id, "mode": "full", "content": content},
-            ensure_ascii=False,
-        )
+        return page(content)
 
     def delete_session_archives(self) -> int:
         """Delete encrypted archives owned by the trusted current session."""
@@ -286,10 +275,10 @@ def register_recall_context_tool(mcp_server) -> None:
     from tools.mcp_protocol import ToolDefinition
 
     async def _recall_context(
-        ref_id: str, mode: str = "full", pattern: str = "", tail_lines: int = 50
+        ref_id: str, mode: str = "full", pattern: str = "", tail_lines: int = 50, offset: int = 0
     ) -> str:
         store = get_context_store()
-        return store.read(ref_id, mode=mode, pattern=pattern, tail_lines=tail_lines)
+        return store.read(ref_id, mode=mode, pattern=pattern, tail_lines=tail_lines, offset=offset)
 
     mcp_server.register_tool(
         ToolDefinition(
@@ -297,7 +286,8 @@ def register_recall_context_tool(mcp_server) -> None:
             description=(
                 "回忆此前被截断/压缩的完整上下文。当看到工具结果占位符"
                 "【内容过长已存档 ref_id=ctx_xxx】时，用本工具取回完整内容。"
-                "mode: full=完整 / tail=末尾N行 / grep=按正则过滤行（推荐先用 grep 精确定位）"
+                "mode: full=分段原文 / tail=末尾N行 / grep=按正则过滤行。"
+                "每次最多返回4000字符；有next_offset时用offset继续读取。推荐先grep定位。"
             ),
             input_schema={
                 "type": "object",
@@ -309,11 +299,13 @@ def register_recall_context_tool(mcp_server) -> None:
                         "description": "读取模式，默认 full",
                     },
                     "pattern": {"type": "string", "description": "grep 模式下的正则表达式"},
-                    "tail_lines": {"type": "integer", "description": "tail 模式下行数，默认 50"},
+                    "tail_lines": {"type": "integer", "minimum": 1, "maximum": 200, "description": "tail 模式下行数，默认 50"},
+                    "offset": {"type": "integer", "minimum": 0, "description": "读取偏移，默认0；继续时使用上次next_offset"},
                 },
                 "required": ["ref_id"],
             },
             handler=_recall_context,
             category="context",
+            side_effect="read_only",
         )
     )
