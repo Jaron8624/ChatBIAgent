@@ -92,8 +92,10 @@ PLAN_SOTA_PROMPT = """你是资深数据分析任务规划专家。请把以下�
 async def plan_with_sota(query: str) -> Dict[str, Any]:
     """用 SOTA 模型做任务规划，返回结构化计划"""
     model = _sota_model()
+    from governance.context import current
+    from governance.policy import prompt
     resp = await model.ainvoke([
-        ("system", PLAN_SOTA_PROMPT.format(query=query)),
+        ("system", PLAN_SOTA_PROMPT.format(query=query) + '\n' + prompt(current())),
         ("human", "请输出 JSON 计划。"),
     ])
     import json

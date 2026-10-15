@@ -21,7 +21,11 @@ DDL = """
 CREATE TABLE IF NOT EXISTS memory_stores (
  id TEXT PRIMARY KEY,tenant TEXT NOT NULL,owner_id BIGINT NOT NULL,
  workspace TEXT NOT NULL,name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('database','managed_file')),
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),UNIQUE(tenant,owner_id,workspace));
+ domain TEXT NOT NULL DEFAULT 'default',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),UNIQUE(tenant,owner_id,domain,workspace));
+ALTER TABLE memory_stores ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memory_stores DROP CONSTRAINT IF EXISTS memory_stores_tenant_owner_id_workspace_key;
+CREATE UNIQUE INDEX IF NOT EXISTS memory_store_domain_workspace ON memory_stores(tenant,owner_id,domain,workspace);
 CREATE TABLE IF NOT EXISTS memory_store_grants (
  store_id TEXT REFERENCES memory_stores(id) ON DELETE CASCADE,user_id BIGINT NOT NULL,
  access TEXT NOT NULL CHECK(access IN ('read','write')),PRIMARY KEY(store_id,user_id));
@@ -147,20 +151,40 @@ class ManagedMemory:
         if row is None or (row["owner_id"] != user_id and (owner or not row["grant_access"]
                 or (write and row["grant_access"] != "write"))):
             raise PermissionError("memory_store_not_authorized")
+        from governance.context import current
+        ctx = current()
+        if ctx and row['domain'] != ctx.domain:
+            raise PermissionError('memory_store_outside_business_domain')
+        if row['domain'] != 'default':
+            from governance.service import get_governance
+            from infra.async_io import run_blocking
+            governance = await run_blocking(get_governance)
+            await run_blocking(governance.authorize,tenant,user_id,row['domain'])
         return dict(row)
 
-    async def create_store(self, user_id, tenant, workspace, name="", kind="database"):
+    async def create_store(self, user_id, tenant, workspace, name="", kind="database", domain=None):
         user_id, tenant = identity(user_id, tenant)
+        from governance.context import current
+        from governance.policy import name as domain_name
+        ctx = current()
+        domain = domain_name(domain or (ctx.domain if ctx else 'default'))
+        if ctx and domain != ctx.domain:
+            raise PermissionError('memory_store_outside_business_domain')
+        if domain != 'default':
+            from governance.service import get_governance
+            from infra.async_io import run_blocking
+            governance = await run_blocking(get_governance)
+            await run_blocking(governance.authorize,tenant,user_id,domain)
         if not isinstance(workspace, str) or len(workspace) > 100 or not isinstance(name, str) or len(name) > 200:
             raise ValueError("invalid_workspace")
         if kind not in {"database", "managed_file"}:
             raise ValueError("invalid_store_kind")
         cipher()  # Fail before creating an unusable resource.
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""INSERT INTO memory_stores(id,tenant,owner_id,workspace,name,kind)
-                VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant,owner_id,workspace)
+            row = await conn.fetchrow("""INSERT INTO memory_stores(id,tenant,owner_id,workspace,name,kind,domain)
+                VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(tenant,owner_id,domain,workspace)
                 DO UPDATE SET workspace=EXCLUDED.workspace RETURNING *""",
-                str(uuid.uuid4()), tenant, user_id, workspace, name or workspace or "个人记忆", kind)
+                str(uuid.uuid4()), tenant, user_id, workspace, name or workspace or "个人记忆", kind, domain)
         return {**dict(row), "source": "memory://" + row["id"]}
 
     async def grant(self, store_id, user_id, tenant, grantee, access):
@@ -204,11 +228,14 @@ class ManagedMemory:
                     tenant, user_id, session_id, identifier(source["store_id"]), source.get("access", "read"))
 
     async def sources(self, conn, user_id, tenant, session_id):
-        return await conn.fetch("""SELECT b.*,s.workspace,s.owner_id,s.kind FROM memory_source_bindings b
+        from governance.context import current
+        ctx = current()
+        rows = await conn.fetch("""SELECT b.*,s.workspace,s.owner_id,s.kind,s.domain FROM memory_source_bindings b
             JOIN memory_stores s ON s.id=b.store_id LEFT JOIN memory_store_grants g ON g.store_id=s.id AND g.user_id=b.user_id
             WHERE b.tenant=$1 AND s.tenant=$1 AND b.user_id=$2 AND b.session_id=$3
             AND (s.owner_id=$2 OR g.access IN ('read','write'))
             AND (b.access='read' OR s.owner_id=$2 OR g.access='write')""", tenant, user_id, session_id)
+        return [row for row in rows if not ctx or row['domain']==ctx.domain]
 
     async def audit(self, conn, store_id, actor, action, metadata):
         await conn.execute("INSERT INTO memory_store_audit(store_id,actor_id,action,metadata) VALUES($1,$2,$3,$4::jsonb)",
@@ -384,12 +411,15 @@ class ManagedMemory:
                 except Exception:
                     pass
             query_terms = terms(query)
+            from governance.context import current
+            ctx = current()
+            weights = ctx.policy.get('retrieval_weights', {}) if ctx else {}
             lexical = sorted(candidates, key=lambda r: len(query_terms & terms(r["content"])), reverse=True)
             dense = sorted(candidates, key=lambda r: cosine(vector, r.get("vector", [])), reverse=True)
-            ranks = {r["id"]: 1 / (60 + i) for i, r in enumerate(lexical, 1)}
+            ranks = {r["id"]: weights.get('lexical', 1.0) / (60 + i) for i, r in enumerate(lexical, 1)}
             if vector:
                 for i, r in enumerate(dense, 1):
-                    ranks[r["id"]] += 1 / (60 + i)
+                    ranks[r["id"]] += weights.get('dense', 1.0) / (60 + i)
             now = datetime.now(timezone.utc)
             for r in candidates:
                 days = max(0, (now - r["last_access"]).total_seconds() / 86400)

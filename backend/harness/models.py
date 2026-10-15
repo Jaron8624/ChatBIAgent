@@ -245,6 +245,11 @@ class RunManifest:
                 if (digest := file_hash(path)) is not None
             },
         }
+        from governance.context import current
+        principal = current()
+        if principal:
+            safe_env['execution_principal'] = {'user_id':principal.user_id,'tenant_id':principal.tenant,
+                'domain_id':principal.domain,'policy_hash':principal.policy_hash}
         cfg = config or {}
         return cls(
             run_id=run_id,

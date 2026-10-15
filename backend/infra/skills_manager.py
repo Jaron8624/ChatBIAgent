@@ -48,6 +48,12 @@ class Skill:
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     usage_count: int = 0
     success_rate: float = 1.0
+    scope: str = ''
+    tenant_id: str = ''
+    domain_id: str = ''
+    owner_id: int = 0
+    team_id: str = ''
+    knowledge_id: str = ''
 
     @property
     def id(self) -> str:
@@ -186,6 +192,14 @@ class SkillsManager:
         query_words = set(query.lower().split())
         scored = []
         for skill in self._skills.values():
+            if skill.category=='evolved':
+                from governance.context import permits
+                if not permits(skill.to_dict()):
+                    continue
+                from governance.context import current
+                from governance.service import get_governance
+                if skill.knowledge_id not in {r['rule_id'] for r in get_governance().active_rules(current())}:
+                    continue
             text = f"{skill.name} {skill.description} {' '.join(skill.tags)}".lower()
             score = sum(1 for w in query_words if w in text)
             if score > 0:
@@ -216,7 +230,16 @@ class SkillsManager:
         这是分层长期上下文的核心能力之一
         """
         skills = self.retrieve_relevant_skills(query, top_k)
-        overlays = list(_candidate_skill_overlay.get())
+        overlays = []
+        for item in _candidate_skill_overlay.get():
+            if 'forced' in item.tags:
+                overlays.append(item)  # Explicit offline Harness overlay only.
+            elif item.category!='harness_candidate':
+                overlays.append(item)
+            else:
+                from governance.context import permits
+                if permits(item.to_dict()):
+                    overlays.append(item)
         if not skills and not overlays:
             return base_prompt
         # Candidate overlays are forced into the prompt. They are deliberately

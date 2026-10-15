@@ -115,6 +115,8 @@ class EvolutionLoop:
         # 延迟导入避免循环依赖（api.py 也导入本模块）
         from api import get_evaluator
 
+        from governance.incubation import incubate_reviewed_feedback
+        governed_queued = await incubate_reviewed_feedback(self._get_llm(),self.batch_limit)
         evaluator = get_evaluator()
         cases = evaluator.get_bad_cases(limit=50)
 
@@ -131,6 +133,7 @@ class EvolutionLoop:
             "candidates_queued": 0,
             "failed": 0,
             "last_error": "",
+            'governed_candidates_queued':governed_queued,
         }
 
         if not pending:

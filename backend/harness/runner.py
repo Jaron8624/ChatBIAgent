@@ -179,7 +179,7 @@ class ExperimentRunner:
 
         try:
             if self.preflight_checker is not None:
-                preflight = self.preflight_checker.run()
+                preflight = await asyncio.to_thread(self.preflight_checker.run)
                 self.store.audit(
                     "experiment", experiment_id, "preflight_completed", "harness", preflight.to_dict()
                 )

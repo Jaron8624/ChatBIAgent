@@ -166,6 +166,29 @@ class SchemaRetriever:
     """按 query 返回 Level 1→2→3 的可解释检索结果（带 LRU 缓存）。"""
 
     _CACHE_CAP = 256
+    _domain_instances = OrderedDict()
+
+    def __new__(cls):
+        from governance.context import current
+        ctx=current()
+        if not ctx or ctx.domain=='default':
+            return super().__new__(cls)
+        key=(ctx.tenant,ctx.domain,ctx.policy_hash)
+        if key not in cls._domain_instances:
+            cls._domain_instances[key]=super().__new__(cls)
+            if len(cls._domain_instances)>64:
+                cls._domain_instances.popitem(last=False)
+        cls._domain_instances.move_to_end(key)
+        return cls._domain_instances[key]
+
+    @classmethod
+    def invalidate_domain(cls, policy_hash):
+        from governance.context import current
+        ctx=current()
+        for key in list(cls._domain_instances):
+            if key[2]==policy_hash and (not ctx or key[:2]==(ctx.tenant,ctx.domain)):
+                old=cls._domain_instances.pop(key)
+                old._cache.clear()
 
     # The physical corpus is predominantly English. Expand only governed
     # business aliases, not arbitrary model-invented table/column names.
@@ -192,6 +215,9 @@ class SchemaRetriever:
         return query + " " + " ".join(expanded)
 
     def __init__(self):
+        if getattr(self,'_initialized',False):
+            return
+        self._initialized=True
         self._domain_names = list(DOMAINS.keys())
         domain_corpus = [
             " ".join(DOMAINS[name]["aliases"]) + " " + DOMAINS[name]["description"]
@@ -221,7 +247,10 @@ class SchemaRetriever:
             self._cache.popitem(last=False)
 
     def retrieve(self, query: str, top_domains: int = 2, top_tables: int = 5) -> List[SchemaHit]:
-        cache_key = (query, top_domains, top_tables)
+        from governance.context import current
+        ctx = current()
+        allowed = set(ctx.policy['allowed_tables']) if ctx and 'allowed_tables' in ctx.policy else None
+        cache_key = (query, top_domains, top_tables, ctx.policy_hash if ctx else '')
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
@@ -231,7 +260,8 @@ class SchemaRetriever:
         if not domain_rank:
             domain_rank = [(self._domain_names.index("olist_order"), 0.001),
                            (self._domain_names.index("chinook_sales"), 0.001)]
-        chosen_domains = domain_rank[:top_domains]
+        chosen_domains = [(i,s) for i,s in domain_rank if allowed is None or
+                          allowed.intersection(DOMAINS[self._domain_names[i]]['tables'])][:top_domains]
 
         hits: List[SchemaHit] = []
         candidate_tables: List[str] = []
@@ -248,6 +278,7 @@ class SchemaRetriever:
             t for t in self._table_names if t in global_score and t not in candidate_tables]
 
         table_scores = [(t, global_score.get(t, 0.0)) for t in candidate_set]
+        table_scores = [(t,s) for t,s in table_scores if allowed is None or t in allowed]
         table_scores.sort(key=lambda item: item[1], reverse=True)
         # 只保留真实命中的表；若全部无命中，保留每个选中域的首表做 schema 兜底
         chosen_tables = [t for t, s in table_scores if s > 0][:top_tables]
@@ -255,7 +286,7 @@ class SchemaRetriever:
             seen = set()
             for idx, _ in chosen_domains:
                 for t in DOMAINS[self._domain_names[idx]]["tables"]:
-                    if t not in seen:
+                    if t not in seen and (allowed is None or t in allowed):
                         chosen_tables.append(t)
                         seen.add(t)
                         break
@@ -309,6 +340,11 @@ class SQLExampleStore:
         terms = set(re.findall(r"[\w\u4e00-\u9fff]+", query.lower()))
         scored = []
         for item in self._read():
+            from governance.policy import enforce_sql
+            try:
+                enforce_sql(item.get('sql',''))
+            except Exception:
+                continue
             corpus = " ".join([item.get("question", ""), item.get("intent", ""), " ".join(item.get("tags", []))]).lower()
             score = sum(1 for term in terms if len(term) > 1 and term in corpus)
             scored.append((score, item))

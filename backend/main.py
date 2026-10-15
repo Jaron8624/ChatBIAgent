@@ -82,6 +82,34 @@ async def prune_graph_checkpoints():
             logger.exception("清理过期图检查点失败")
         await asyncio.sleep(3600)
 
+
+async def daily_domain_operations():
+    """T+1 is an application maintenance task, not an online quality assertion."""
+    from datetime import datetime,timezone,timedelta
+    from sqlalchemy import select
+    from governance.schema import records
+    from governance.service import get_governance
+    from governance.operations import daily_report
+    from infra.async_io import run_blocking
+    def tick():
+        service=get_governance()
+        service.retire_stale()
+        with service.engine.connect() as conn:
+            domains=conn.execute(select(records).where(records.c.kind=='domain')).mappings().all()
+        day=(datetime.now(timezone.utc).date()-timedelta(days=1)).isoformat()
+        for domain in domains:
+            p=domain['payload']
+            ctx=service.context(domain['tenant'],p['owner'],domain['domain'])
+            daily_report(service,ctx,day)
+    while True:
+        try:
+            async with maintenance_leader('daily-domain-operations') as leader:
+                if leader:
+                    await run_blocking(tick)
+        except Exception:
+            logger.exception('业务域 T+1 运营分析失败，将在下一周期重试')
+        await asyncio.sleep(3600)
+
 # 全局追踪所有后台任务
 background_tasks: Set[asyncio.Task] = set()
 
@@ -178,6 +206,9 @@ async def lifespan(app: FastAPI):
         maintenance_enabled = os.getenv("MAINTENANCE_ENABLED", "true").lower() == "true"
         if maintenance_enabled:
             task = asyncio.create_task(check_and_store_memory())
+            operations_task=asyncio.create_task(daily_domain_operations())
+            background_tasks.add(operations_task)
+            operations_task.add_done_callback(background_tasks.discard)
             consolidation_task = asyncio.create_task(consolidate_long_term_memory())
             background_tasks.add(consolidation_task)
             consolidation_task.add_done_callback(background_tasks.discard)

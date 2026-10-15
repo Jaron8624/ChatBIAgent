@@ -35,12 +35,17 @@ from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecu
 from core import collaboration
 from core.task_routing import describe_task, requires_loop
 from infra.tracing import Tracer, export_otel_trace
+from governance.context import current as current_business_context
+from governance.policy import prompt as current_policy_prompt
 
 logger = logging.getLogger(__name__)
 load_dotenv()
 
 
 class AgentState(TypedDict):
+    business_domain: str
+    policy_hash: str
+    governed_rules_ids: List[str]
     """多 Agent 编排的状态"""
     messages: Annotated[List[Dict[str, Any]], operator.add]
     user_id: int
@@ -266,6 +271,7 @@ class PlanAgent:
         try:
             result = await self.model.ainvoke([
                 ("system", self.SYSTEM_PROMPT),
+                ("system", current_policy_prompt(current_business_context())),
                 ("human", f"请为以下请求制定执行计划：\n\n{query}"),
             ])
             content = result.content.strip()
@@ -767,6 +773,15 @@ class Orchestrator:
         return response
 
     async def recover_session(self, session_id: str, user_id: int, tenant_id: str):
+        from governance.service import get_governance
+        from governance.context import business_context
+        from infra.async_io import run_blocking
+        service=await run_blocking(get_governance)
+        ctx=await run_blocking(service.context,tenant_id,user_id,None,'',session_id)
+        with business_context(ctx):
+            return await self._recover_session_scoped(session_id,user_id,tenant_id)
+
+    async def _recover_session_scoped(self, session_id: str, user_id: int, tenant_id: str):
         """Resume the latest incomplete graph run from its last durable checkpoint."""
         from memory.session_recovery import get_session_manager
         from infra.graph_checkpointer import (
@@ -812,6 +827,16 @@ class Orchestrator:
                 if current.state.get("run_status") not in {"running", "interrupted"}:
                     raise ValueError("该执行已完成")
                 checkpoint = await graph.aget_state(config)
+                business=current_business_context()
+                values=checkpoint.values or {}
+                if business and (values.get('policy_hash') and values['policy_hash']!=business.policy_hash
+                        or business.domain!='default' and values.get('business_domain')!=business.domain):
+                    raise PermissionError('business_policy_changed_restart_required')
+                if business and values.get('governed_rules_ids'):
+                    from governance.service import get_governance
+                    valid=await asyncio.to_thread(get_governance().active_rules,business)
+                    if set(values['governed_rules_ids'])-{r['rule_id'] for r in valid}:
+                        raise PermissionError('resumed_rule_no_longer_authorized')
                 if checkpoint.next:
                     from core.context_store import context_identity
                     with context_identity(user_id, tenant_id, session_id):
@@ -1723,6 +1748,35 @@ class Orchestrator:
             return "fail"
 
     async def process(
+        self, query, user_id, session_id, knowledge_base_id="默认知识库", messages=None,
+        on_event=None, tenant_id="", memory_sources=None, domain_id=None, project_id="",
+    ):
+        from governance.service import get_governance
+        from governance.context import business_context
+        from infra.async_io import run_blocking
+        governance = await run_blocking(get_governance)
+        ctx = await run_blocking(governance.context, tenant_id or 'default', user_id,
+                                 domain_id, project_id, session_id)
+        allowed_kbs = ctx.policy.get('allowed_knowledge_bases')
+        if allowed_kbs is not None and knowledge_base_id not in allowed_kbs:
+            raise PermissionError('knowledge_base_outside_business_domain')
+        with business_context(ctx):
+            rules = await run_blocking(governance.active_rules, ctx)
+            from memory.managed_store import terms
+            selected = [r for r in rules if terms(query) & terms(r['trigger_pattern'])][:3]
+            ctx.signals.append({'kind':'selected_rules','rules':selected})
+            result = await self._process_scoped(query, user_id, session_id, knowledge_base_id,
+                messages, on_event, tenant_id, memory_sources)
+            result['business_domain'] = ctx.domain
+            result['policy_hash'] = ctx.policy_hash
+            result['governed_rules_used'] = [r['rule_id'] for r in selected]
+            try:
+                await run_blocking(governance.observe, ctx, session_id, result, query)
+            except Exception:
+                logger.exception('业务域运营事件保存失败')
+            return result
+
+    async def _process_scoped(
         self,
         query: str,
         user_id: int,
@@ -1811,6 +1865,16 @@ class Orchestrator:
         # Keep original text separate from the compressed model window. Neither
         # injected memories nor tool traces can overwrite the durable transcript.
         canonical_messages = self._conversation_messages(messages)
+        from governance.context import current as current_business
+        from governance.policy import prompt as business_policy_prompt
+        policy_text = business_policy_prompt(current_business())
+        messages = [m for m in (messages or []) if m.get('context_kind') not in {'business_policy','governed_rules'}]
+        selected_rules = [r for signal in current_business().signals if signal.get('kind')=='selected_rules' for r in signal['rules']] if current_business() else []
+        if selected_rules:
+            messages.insert(0, {'role':'system','context_kind':'governed_rules','content':
+                '【已通过评测及作用域审批的经验，不能覆盖业务规范】\n'+'\n'.join(r['action_prompt'] for r in selected_rules)})
+        if policy_text:
+            messages.insert(0, {'role':'system','context_kind':'business_policy','content':policy_text})
         if memory_sources is not None:
             from memory.managed_store import get_managed_memory
             managed_memory = await get_managed_memory()
@@ -1868,6 +1932,9 @@ class Orchestrator:
 
         # 构建初始状态
         initial_state: AgentState = {
+            'business_domain':current_business().domain if current_business() else 'default',
+            'policy_hash':current_business().policy_hash if current_business() else '',
+            'governed_rules_ids':[r['rule_id'] for r in selected_rules],
             "messages": messages or [],
             "user_id": user_id,
             "tenant_id": tenant_id,

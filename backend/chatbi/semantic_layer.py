@@ -686,22 +686,12 @@ def match_metrics_by_query(query: str) -> List[str]:
     """基于业务别名从 query 中匹配可能相关的指标，并按数据域消除同义词歧义。"""
     query_lower = query.lower()
     is_chinook = any(word in query_lower for word in ("chinook", "音乐", "流派", "艺术家", "歌手", "专辑", "曲目", "发票", "invoice", "genre", "artist", "track"))
-    aliases = {
-        "sales_revenue": ["销售额", "销售收入", "成交额", "gmv", "sales revenue"],
-        "order_count": ["订单量", "订单数", "订单", "order count"],
-        "avg_order_value": ["客单价", "平均订单金额"],
-        "repeat_customers": ["回头客", "复购客户", "复购用户"],
-        "bad_review_rate": ["差评率", "差评", "低评分"],
-        "avg_shipping_time": ["物流时长", "配送时长", "发货时长"],
-        "delay_rate": ["延迟率", "延迟发货", "延期"],
-        "payment_distribution": ["支付方式", "支付占比"],
-        "seller_count": ["卖家数", "活跃卖家"],
-        "revenue": ["收入", "营收", "revenue"],
-        "invoice_count": ["发票数", "发票量", "invoice count"],
-        "track_count": ["曲目销量", "曲目数"],
-        "genre_revenue": ["流派收入", "流派营收", "genre revenue"],
-        "artist_revenue": ["艺术家收入", "歌手收入", "artist revenue"],
-    }
+    from governance.context import current
+    from governance.policy import resolve
+    aliases = dict((current().policy if current() else resolve()[0])['metric_aliases'])
+    if current() and current().policy.get('allowed_tables') and all(
+            t.startswith('chinook.') for t in current().policy['allowed_tables']):
+        is_chinook = True
     aliases.update(EXTRA_METRIC_ALIASES)
     matched = [name for name, words in aliases.items() if any(word in query_lower for word in [name, *words])]
     # “收入/订单/数量”等词跨两个数据集同名；显式 Chinook 语境优先其指标，

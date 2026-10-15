@@ -47,25 +47,38 @@ class HarnessRuntime:
     def select(self, tenant_id: str, user_id: Any) -> RuntimeRelease:
         tenant = str(tenant_id or "default")
         user = str(user_id or "")
+        from governance.context import current, permits, BusinessContext
+        context=current() or BusinessContext(tenant=tenant,user_id=user_id)
+        def eligible(item):
+            if not item:
+                return False
+            if item.get('kind')!='evolution_rule':
+                return True
+            payload=item.get('payload_json') or {}
+            if not permits(payload,context) or not payload.get('knowledge_id'):
+                return False
+            from governance.service import get_governance
+            return any(r['rule_id']==payload['knowledge_id'] and r['harness_candidate_id']==item['candidate_id']
+                       for r in get_governance().active_rules(context))
         channel = self.store.get_release_channel(tenant) or self.store.get_release_channel()
         if channel is not None:
             policy = channel.get("policy_json") or {}
             canary = self.store.get_candidate(channel.get("canary_id", ""))
             allowlist = policy.get("tenant_ids") or []
             bucket = int(hashlib.sha256(f"{channel.get('canary_id')}:{tenant}:{user}".encode()).hexdigest()[:8], 16) % 10000 / 100
-            if (canary and canary["status"] == CandidateStatus.SHADOW.value
+            if (eligible(canary) and canary["status"] == CandidateStatus.SHADOW.value
                     and (not allowlist or tenant in allowlist)
                     and bucket < float(policy.get("traffic_percent", 0))):
                 return RuntimeRelease(tenant, user, canary["candidate_id"], "canary", True, "versioned canary bucket")
             active = self.store.get_candidate(channel.get("active_id", ""))
-            if active and active["status"] == CandidateStatus.ACTIVE.value:
+            if eligible(active) and active["status"] == CandidateStatus.ACTIVE.value:
                 return RuntimeRelease(tenant, user, active["candidate_id"], "active", True, "versioned active pointer")
             return RuntimeRelease(tenant_id=tenant, user_id=user)
         candidates = self.store.list_candidates()
 
         active = [
             item for item in candidates
-            if item.get("status") == CandidateStatus.ACTIVE.value
+            if item.get("status") == CandidateStatus.ACTIVE.value and eligible(item)
         ]
         if active:
             active.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
@@ -83,6 +96,8 @@ class HarnessRuntime:
         # is completed.  The release controller owns deterministic tenant and
         # user bucketing, so every request makes the same choice.
         for item in candidates:
+            if not eligible(item):
+                continue
             if item.get("status") != CandidateStatus.SHADOW.value:
                 continue
             route = self.release_controller.route_for_canary(
@@ -111,6 +126,8 @@ class HarnessRuntime:
             category="harness_candidate",
             tags=["harness", "candidate", "runtime"],
             version=str(candidate.get("version", "1.0.0")),
+            scope=payload.get('scope',''),tenant_id=payload.get('tenant_id',''),domain_id=payload.get('domain_id',''),
+            owner_id=payload.get('owner_id',0),team_id=payload.get('team_id',''),knowledge_id=payload.get('knowledge_id',''),
         )
 
     @contextmanager
@@ -122,17 +139,21 @@ class HarnessRuntime:
             yield release
 
     @asynccontextmanager
-    async def async_request_scope(self, tenant_id, user_id):
+    async def async_request_scope(self, tenant_id, user_id, domain_id=None, session_id='', project_id=''):
         from infra.async_io import run_blocking
+        from governance.service import get_governance
+        from governance.context import business_context
         def load():
-            release = self.select(tenant_id, user_id)
-            candidate = self.store.get_candidate(release.candidate_id) if release.selected else None
-            return release, candidate
-        release, candidate = await run_blocking(load)
+            context=get_governance().context(tenant_id,user_id,domain_id,project_id,session_id)
+            with business_context(context):
+                release = self.select(tenant_id, user_id)
+                candidate = self.store.get_candidate(release.candidate_id) if release.selected else None
+            return release, candidate, context
+        release, candidate, context = await run_blocking(load)
         skill = self._candidate_skill(candidate or {})
         # The ContextVar overlay belongs to the request coroutine, not to the
         # SQL worker thread. Never enter the overlay inside run_blocking.
-        with self.skills_manager.candidate_overlay([skill] if skill else []):
+        with business_context(context), self.skills_manager.candidate_overlay([skill] if skill else []):
             yield release
 
     def observe(

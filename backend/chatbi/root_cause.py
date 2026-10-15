@@ -82,9 +82,15 @@ class PlanChain:
         )
 
     async def plan(self, query: str, history_context: str = "") -> Dict[str, Any]:
+        from governance.context import current
+        from governance.policy import prompt as governance_prompt
         prompt = f"用户问题：{query}\n\n{('对话上下文：' + history_context) if history_context else ''}\n\n请输出 RCA 验证计划 JSON。"
+        system=PLAN_PROMPT
+        if current() and current().domain!='default':
+            from chatbi.schema_retrieval import SchemaRetriever
+            system=PLAN_PROMPT.split('数据库背景：')[0]+'可用数据库结构：\n'+SchemaRetriever().as_prompt(query)+'\n输出格式'+PLAN_PROMPT.split('输出格式',1)[1]
         result = await self.model.ainvoke([
-            ("system", PLAN_PROMPT),
+            ("system", system + '\n' + governance_prompt(current())),
             ("human", prompt),
         ])
         content = self._extract_json(result.content)

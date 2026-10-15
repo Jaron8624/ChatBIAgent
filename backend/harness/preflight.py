@@ -86,12 +86,14 @@ class PreflightChecker:
         require_judge: bool = False,
         require_clean_git: bool = False,
         extra_checks: Optional[List[Callable[[], PreflightCheck]]] = None,
+        validate_model_catalog: bool = False,
     ):
         self.project_root = project_root or Path(__file__).resolve().parents[2]
         self.require_usage_metrics = require_usage_metrics
         self.require_judge = require_judge
         self.require_clean_git = require_clean_git
         self.extra_checks = extra_checks or []
+        self.validate_model_catalog = validate_model_catalog
 
     def run(self) -> PreflightReport:
         if load_dotenv:
@@ -101,6 +103,8 @@ class PreflightChecker:
         checks.append(self._git_check())
         checks.append(self._snapshot_check())
         checks.append(self._model_check())
+        if self.validate_model_catalog:
+            checks.append(self._model_catalog_check())
         checks.append(self._judge_check())
         checks.append(self._milvus_check())
         checks.append(self._embedding_check())
@@ -164,6 +168,22 @@ class PreflightChecker:
             detail="model endpoint and credential configured" if passed else "BASE_URL, AGENT_BASE_MODEL or API key is missing",
             metadata={"provider": provider or "openai_compatible", "base_url": base_url, "model": model, "credential_present": configured_key},
         )
+
+    def _model_catalog_check(self) -> PreflightCheck:
+        import httpx
+        provider=os.getenv('LLM_PROVIDER','').lower()
+        base=os.getenv('CATPAW_PROXY_URL' if provider=='catpawcli' else 'BASE_URL','').rstrip('/')
+        key=os.getenv('CATPAW_PROXY_APIKEY' if provider=='catpawcli' else 'DASHSCOPE_API_KEY','') or os.getenv('OPENAI_API_KEY','')
+        model=os.getenv('AGENT_BASE_MODEL','')
+        try:
+            response=httpx.get(base+'/models',headers={'Authorization':'Bearer '+key},timeout=10)
+            response.raise_for_status()
+            ids={item['id'] for item in response.json().get('data',[]) if isinstance(item,dict) and 'id' in item}
+            return PreflightCheck('model_catalog',model in ids,
+                detail='configured model is listed' if model in ids else 'configured model is absent from endpoint catalog; verify aliases explicitly',
+                metadata={'model':model,'listed_model_count':len(ids)})
+        except Exception as error:
+            return PreflightCheck('model_catalog',False,detail='model catalog unavailable: '+type(error).__name__)
 
     def _judge_check(self) -> PreflightCheck:
         model = os.getenv("EVALUATION_MODEL", "").strip()

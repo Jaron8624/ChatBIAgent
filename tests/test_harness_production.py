@@ -163,7 +163,8 @@ class HarnessProductionTests(unittest.TestCase):
         self.assertEqual(self.store.get_bad_case(bad_case_id)["processing_status"], "promoted")
 
     def test_runtime_canary_selects_request_and_records_observation(self):
-        candidate = CandidateSpec.build("evolution_rule", "runtime", {"action_prompt": "Use verified SQL"})
+        candidate = CandidateSpec.build("agent_config", "runtime", {"action_prompt": "Use verified SQL",
+            'tenant_id':'tenant-a','domain_id':'default','scope':'global','owner_id':1})
         self.store.register_candidate(candidate)
         self.store.transition_candidate(candidate.candidate_id, CandidateStatus.EVALUATING, "system", "test")
         self.store.transition_candidate(candidate.candidate_id, CandidateStatus.EVALUATED, "harness", "passed")

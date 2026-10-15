@@ -538,7 +538,7 @@ async def chat_orchestrate(
     start = asyncio.get_event_loop().time()
     try:
         runtime = await run_blocking(get_harness_runtime)
-        async with runtime.async_request_scope(tenant_id, user_id) as release:
+        async with runtime.async_request_scope(tenant_id, user_id, body.get('domain_id'),session_id,body.get('project_id','')) as release:
             with UsageTracker() as tracker:
                 result = await orchestrator.process(
                     query=query,
@@ -548,6 +548,7 @@ async def chat_orchestrate(
                     messages=messages,
                     tenant_id=tenant_id,
                     memory_sources=body.get("memory_sources"),
+                    domain_id=body.get("domain_id"), project_id=body.get("project_id", ""),
                 )
             usage = tracker.snapshot()
             if usage["calls"] == 0 and result.get("usage_available"):
@@ -635,7 +636,7 @@ async def chat_orchestrate_stream(
             nonlocal release
             started = asyncio.get_event_loop().time()
             try:
-                async with runtime.async_request_scope(tenant_id, user_id) as selected_release:
+                async with runtime.async_request_scope(tenant_id, user_id, body.get('domain_id'),session_id,body.get('project_id','')) as selected_release:
                     release = selected_release
                     with UsageTracker() as tracker:
                         result = await orchestrator.process(
@@ -647,6 +648,7 @@ async def chat_orchestrate_stream(
                             on_event=on_event,
                             tenant_id=tenant_id,
                             memory_sources=body.get("memory_sources"),
+                            domain_id=body.get("domain_id"), project_id=body.get("project_id", ""),
                         )
                     usage = tracker.snapshot()
                     if usage["calls"] == 0 and result.get("usage_available"):
@@ -1175,6 +1177,8 @@ async def get_evolution_rules(
         rules = engine.get_pending_rules()
     else:
         rules = engine.get_all_rules()
+    rules=[r for r in rules if r.get('tenant_id')==user_info['tenant_id'] and
+           (r.get('owner_id')==user_info['user_id'] or (r.get('scope')=='global' and r.get('domain_id')=='default'))]
     return {"success": True, "rules": rules}
 
 
@@ -1929,3 +1933,7 @@ async def connect_mcp_servers(
         "server_count": pool.server_count,
         "message": "外部 MCP Server 连接完成",
     }
+
+
+from governance.api import register_governance_api
+register_governance_api(router)

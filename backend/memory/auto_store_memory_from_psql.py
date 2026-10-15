@@ -159,7 +159,7 @@ async def get_unsunmarized_conversations(
         async with pg_client.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, role, content, created_at, thread_id
+                SELECT id, role, content, created_at, thread_id, domain_id
                 FROM raw_conversations
                 WHERE user_id = $1 
                 AND thread_id = $2
@@ -390,11 +390,13 @@ async def _managed_extract_locked(pg, ledger, model, user_id, tenant_id, thread_
             bound = await conn.fetch("SELECT * FROM memory_source_bindings WHERE tenant=$1 AND user_id=$2 AND session_id=$3", tenant_id, user_id, thread_id)
         target = next((r["store_id"] for r in bound if r["access"] == "write"), None)
         if not bound:
-            target = (await service.create_store(user_id, tenant_id, ""))["id"]
+            target = (await service.create_store(user_id, tenant_id, "", domain=messages[0].get('domain_id','default')))["id"]
         attributes = []
         if target:
             async with pg.pool.acquire() as conn:
-                await service.authorize_runtime(conn, target, user_id, tenant_id, thread_id, write=True)
+                target_store=await service.authorize_runtime(conn, target, user_id, tenant_id, thread_id, write=True)
+                if any(m.get('domain_id','default') != target_store['domain'] for m in messages):
+                    raise PermissionError('conversation_and_memory_domain_must_match')
                 rows = await conn.fetch("SELECT topic FROM memory_units WHERE store_id=$1 AND level=1 AND status='active' LIMIT 512", target)
                 attributes = [{"memory_key": r["topic"]} for r in rows]
         extracted = await extract_memories(messages, model, attributes)

@@ -157,7 +157,7 @@ class PostgreSQLParentClient:
                         if not await conn.fetchval("SELECT to_regclass('nexusmind_schema_versions')"):
                             raise RuntimeError("run_explicit_database_migration_first")
                         version = await conn.fetchval("SELECT max(version) FROM nexusmind_schema_versions")
-                        if version != 3:
+                        if version != 4:
                             raise RuntimeError("database_schema_version_mismatch")
                         self._pool_initialized = True
                         return
@@ -232,6 +232,8 @@ class PostgreSQLParentClient:
                         ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(160) NOT NULL DEFAULT 'default';
                     ALTER TABLE raw_conversations
                         ADD COLUMN IF NOT EXISTS turn_id VARCHAR(64);
+                    ALTER TABLE raw_conversations
+                        ADD COLUMN IF NOT EXISTS domain_id VARCHAR(100) NOT NULL DEFAULT 'default';
 
                     -- 独立创建索引，加速查询
                     CREATE INDEX IF NOT EXISTS idx_user_created ON raw_conversations(user_id, created_at); -- 加速查询：查询某用户的所有对话
@@ -288,7 +290,7 @@ class PostgreSQLParentClient:
                     await conn.execute(MEMORY_DDL)
                     await conn.execute("""CREATE TABLE IF NOT EXISTS nexusmind_schema_versions (
                         version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
-                        INSERT INTO nexusmind_schema_versions(version) VALUES(3) ON CONFLICT DO NOTHING;""")
+                        INSERT INTO nexusmind_schema_versions(version) VALUES(4) ON CONFLICT DO NOTHING;""")
 
                 self._pool_initialized = True
                 logger.info("PostgreSQL client initialized successfully")
@@ -915,6 +917,8 @@ class PostgreSQLParentClient:
         if not thread_id or len(thread_id) > 50 or not turn_id or len(turn_id) > 64:
             raise ValueError("会话或轮次标识无效")
 
+        from governance.context import current
+        business = current()
         rows = (
             (str(uuid.uuid4()), "human", str(query)[:20000]),
             (str(uuid.uuid4()), "ai", str(answer)[:20000]),
@@ -925,8 +929,8 @@ class PostgreSQLParentClient:
                     await conn.execute(
                         """
                         INSERT INTO raw_conversations
-                            (id, user_id, thread_id, tenant_id, turn_id, role, content)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            (id, user_id, thread_id, tenant_id, turn_id, role, content, domain_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         ON CONFLICT (tenant_id, user_id, thread_id, turn_id, role)
                         WHERE turn_id IS NOT NULL DO NOTHING
                         """,
@@ -937,6 +941,7 @@ class PostgreSQLParentClient:
                         turn_id,
                         role,
                         content,
+                        business.domain if business else 'default',
                     )
 
     async def delete_conversation_thread(

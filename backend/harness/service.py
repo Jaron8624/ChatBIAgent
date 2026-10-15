@@ -56,6 +56,8 @@ class HarnessService:
                 "action_prompt": rule.action_prompt,
                 "source_feedback": rule.source_feedback,
                 "source_confidence": rule.confidence,
+                **{key:getattr(rule,key,'') for key in ('scope','tenant_id','domain_id','owner_id',
+                    'team_id','source_session','source_trace','knowledge_id')},
             },
         )
         self.store.register_candidate(candidate, actor=actor)

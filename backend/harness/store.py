@@ -298,6 +298,7 @@ class HarnessStore:
     """Transactional registry for datasets, runs, scores, gates and promotions."""
 
     def __init__(self, database_url: Optional[str] = None):
+        from governance.schema import metadata as governance_metadata
         self.database_url = database_url or self._default_database_url()
         connect_args: Dict[str, Any] = {}
         if self.database_url.startswith("sqlite"):
@@ -311,11 +312,12 @@ class HarnessStore:
         if os.getenv("NEXUSMIND_ENV") == "production" and os.getenv("NEXUSMIND_SCHEMA_BOOTSTRAP") != "true":
             if self.database_url.startswith("sqlite"):
                 raise RuntimeError("production_harness_requires_postgresql")
-            missing = set(metadata.tables) - set(inspect(self.engine).get_table_names())
+            missing = (set(metadata.tables) | set(governance_metadata.tables)) - set(inspect(self.engine).get_table_names())
             if missing:
                 raise RuntimeError("run_explicit_harness_migration_first")
         else:
             metadata.create_all(self.engine)
+            governance_metadata.create_all(self.engine)
 
     @staticmethod
     def _default_database_url() -> str:

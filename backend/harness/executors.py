@@ -50,10 +50,14 @@ class InProcessAgentExecutor:
         manager = self.orchestrator.skills_manager
         context = manager.candidate_overlay([overlay] if overlay else [])
         with context, UsageTracker() as tracker:
+            from governance.context import current
+            principal = current()
             output = await asyncio.wait_for(
                 self.orchestrator.process(
                     query=query,
-                    user_id=int(case.metadata.get("user_id", 900001)),
+                    user_id=principal.user_id if principal else int(case.metadata.get("user_id", 900001)),
+                    tenant_id=principal.tenant if principal else str(case.metadata.get('tenant_id','default')),
+                    domain_id=principal.domain if principal else case.metadata.get('domain_id'),
                     session_id=session_id,
                     knowledge_base_id=str(case.input.get("knowledge_base_id", "默认知识库")),
                     messages=list(case.input.get("messages") or []),

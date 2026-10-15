@@ -64,6 +64,9 @@ async def load_request_memory_context(query, user_id, tenant_id, session_id, tok
         service = await get_managed_memory()
         return await service.context(user_id, tenant_id, session_id, query, token_budget=token_budget)
     from rag.milvus_client import get_milvus_client
+    from governance.context import current
+    if current() and current().domain != 'default':
+        raise PermissionError('domain_memory_requires_managed_mode')
     client = await get_milvus_client()
     return await load_memory_context(client.memory_manager, query, user_id, tenant_id, token_budget=token_budget)
 

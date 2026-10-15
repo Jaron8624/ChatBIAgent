@@ -29,7 +29,7 @@ def register_memory_store_api(router, require_identity):
         async def action():
             value = await body(request)
             service = await get_managed_memory()
-            return await service.create_store(user_info["user_id"], user_info["tenant_id"], value.get("workspace", ""), value.get("name", ""), value.get("kind", "database"))
+            return await service.create_store(user_info["user_id"], user_info["tenant_id"], value.get("workspace", ""), value.get("name", ""), value.get("kind", "database"), domain=value.get('domain_id'))
         return await execute(action)
 
     @router.get("/memory-stores")

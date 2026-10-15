@@ -40,6 +40,12 @@ def _read_only_uri(path: str) -> str:
 
 def _readonly_authorizer(action, arg1, arg2, database_name, trigger_name):
     """Block write, schema, attach, transaction, and pragma operations in SQLite."""
+    from governance.context import current
+    ctx = current()
+    if action == sqlite3.SQLITE_READ and ctx and 'allowed_tables' in ctx.policy:
+        table = (str(database_name)+'.' if database_name not in {'main',None} else '') + str(arg1)
+        if str(arg1) not in {'sqlite_master','sqlite_schema','pragma_table_info'} and table not in ctx.policy['allowed_tables']:
+            return sqlite3.SQLITE_DENY
     denied_names = (
         "SQLITE_INSERT", "SQLITE_UPDATE", "SQLITE_DELETE",
         "SQLITE_CREATE_INDEX", "SQLITE_CREATE_TABLE", "SQLITE_CREATE_TEMP_INDEX",
@@ -111,6 +117,11 @@ def execute_sql(sql: str) -> str:
     支持跨库查询：Olist 表直接用表名，Chinook 表用 chinook. 前缀。
     返回格式：{"columns": [...], "rows": [[...], ...], "row_count": N}
     """
+    try:
+        from governance.policy import enforce_sql
+        enforce_sql(sql)
+    except (PermissionError, ValueError) as exc:
+        return json.dumps({'error':str(exc)},ensure_ascii=False)
     if not _validate_sql(sql):
         return json.dumps({"error": "仅支持 SELECT 查询，禁止写操作"}, ensure_ascii=False)
 
@@ -150,8 +161,11 @@ def get_table_schema() -> str:
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
             olist_tables = cursor.fetchall()
-
+            from governance.context import current
+            ctx = current()
             for table_name, create_sql in olist_tables:
+                if ctx and 'allowed_tables' in ctx.policy and table_name not in ctx.policy['allowed_tables']:
+                    continue
                 cursor.execute(f"SELECT * FROM pragma_table_info('{table_name}')")
                 columns_info = cursor.fetchall()
                 columns = []
@@ -180,6 +194,8 @@ def get_table_schema() -> str:
                 chinook_tables = cursor.fetchall()
 
                 for table_name, create_sql in chinook_tables:
+                    if ctx and 'allowed_tables' in ctx.policy and 'chinook.'+table_name not in ctx.policy['allowed_tables']:
+                        continue
                     cursor.execute(f"SELECT * FROM chinook.pragma_table_info('{table_name}')")
                     columns_info = cursor.fetchall()
                     columns = []

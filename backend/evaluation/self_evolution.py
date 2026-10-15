@@ -45,6 +45,15 @@ class EvolutionRule:
     active_skill_id: str = ""
     rollback_snapshot_id: str = ""
     activated_at: str = ""
+    scope: str = 'user'
+    tenant_id: str = ''
+    domain_id: str = ''
+    owner_id: int = 0
+    team_id: str = ''
+    source_session: str = ''
+    source_trace: str = ''
+    knowledge_id: str = ''
+    last_verified_at: str = ''
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -101,11 +110,13 @@ class SelfEvolutionEngine:
 
     def _save_rules(self):
         path = self._rules_path()
-        with open(path, "w", encoding="utf-8") as f:
+        temporary = path.with_suffix('.json.tmp')
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump(
                 {rid: r.to_dict() for rid, r in self._rules.items()},
                 f, ensure_ascii=False, indent=2
             )
+        os.replace(temporary,path)
 
     def _skill_md_path(self, rule_id: str) -> Path:
         return EVOLUTION_DIR / "skills" / f"{rule_id}.md"
@@ -201,6 +212,8 @@ AI 回答：{response}
             confidence = 0.3
 
         import uuid
+        from governance.context import current
+        ctx=current()
         rule_id = f"rule_{uuid.uuid4().hex[:8]}"
         return EvolutionRule(
             rule_id=rule_id,
@@ -208,12 +221,18 @@ AI 回答：{response}
             action_prompt=action,
             source_feedback=feedback,
             confidence=confidence,
+            tenant_id=ctx.tenant if ctx else '', domain_id=ctx.domain if ctx else '',
+            owner_id=ctx.user_id if ctx else 0, team_id=ctx.team if ctx else '',
+            source_session=record.get('source_session',''),source_trace=record.get('source_trace',''),
         )
 
     def _is_duplicate(self, new_rule: EvolutionRule) -> bool:
         """检查规则是否与现有规则/Skills 重复"""
         # 与已有规则对比
         for existing in self._rules.values():
+            if (existing.tenant_id,existing.domain_id,existing.owner_id,existing.scope)!=(
+                    new_rule.tenant_id,new_rule.domain_id,new_rule.owner_id,new_rule.scope):
+                continue
             if existing.status == "discarded":
                 continue
             sim = self._text_similarity(new_rule.trigger_pattern, existing.trigger_pattern)
@@ -317,6 +336,8 @@ AI 回答：{response}
             prompt_template=rule.action_prompt,
             category="evolved",
             tags=["auto-evolved", "feedback-driven"],
+            scope=rule.scope,tenant_id=rule.tenant_id,domain_id=rule.domain_id,
+            owner_id=rule.owner_id,team_id=rule.team_id,knowledge_id=rule.knowledge_id,
         )
         try:
             skill_id = self._skills_manager.create_skill(skill)
@@ -400,6 +421,19 @@ AI 回答：{response}
         rule = self._rules.get(rule_id)
         if not rule or rule.status not in ("candidate", "evaluated"):
             return False
+        # Legacy JSON is a draft cache, never an authority to publish.
+        from governance.service import get_governance
+        registry=get_governance()
+        governed=registry.get(rule.knowledge_id,rule.tenant_id,rule.domain_id) if rule.knowledge_id else None
+        if not governed or governed['payload'].get('status')!='active':
+            raise PermissionError('scoped_registry_approval_required_before_activation')
+        if any(getattr(rule,key)!=governed['payload'].get(key) for key in
+               ('trigger_pattern','action_prompt','scope','tenant_id','domain_id','owner_id','team_id')):
+            raise PermissionError('draft_differs_from_approved_knowledge')
+        if rule.intended_action=='merge':
+            raise PermissionError('scoped_rule_cannot_mutate_a_shared_base_skill')
+        from harness.service import get_harness_service
+        get_harness_service().require_promotion_gate(rule.harness_candidate_id)
         if rule.intended_action == "merge":
             skill_id, snapshot_id = self._merge_into_existing_skill(rule)
             rule.active_skill_id = skill_id

@@ -98,6 +98,15 @@ class LocalManager(GraphCheckpointerManager):
 
 class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from governance.context import BusinessContext
+        from governance.policy import resolve
+        governance=MagicMock()
+        governance.context.side_effect=lambda tenant,uid,*args,**kwargs: BusinessContext(
+            tenant=tenant,user_id=uid,policy=resolve()[0],policy_hash=resolve()[1])
+        governance.active_rules.return_value=[]
+        governance_patch=patch('governance.service.get_governance',return_value=governance)
+        governance_patch.start()
+        self.addCleanup(governance_patch.stop)
         self.graph_manager = LocalManager()
         self.registry = Registry()
         self.sessions = object.__new__(SessionManager)

@@ -42,19 +42,10 @@ class SchemaLinkingIR:
 class SchemaLinker:
     """将自然语言解析为可被审查的表、字段、指标、维度、过滤中间表示。"""
 
-    DIMENSION_ALIASES = {
-        "customer_state": ["客户州", "各州", "按州", "地区", "地域", "customer state"],
-        "seller_state": ["卖家州", "商家州", "seller state"],
-        "payment_type": ["支付方式", "支付类型", "payment type"],
-        "product_category_name": ["品类", "类目", "商品分类", "类别", "product category", "category"],
-        "year_month": ["月度", "按月", "月份", "每月", "趋势", "by month", "monthly"],
-        "Genre": ["流派", "音乐类型", "genre"],
-        "Artist": ["艺术家", "歌手", "artist"],
-        "BillingCountry": ["国家", "国别", "billing country"],
-        "BillingCity": ["城市", "billing city"],
-    }
-
     def link(self, query: str) -> SchemaLinkingIR:
+        from governance.context import current
+        from governance.policy import resolve
+        aliases = (current().policy if current() else resolve()[0])['dimension_aliases']
         hits = SchemaRetriever().retrieve(query, top_domains=3, top_tables=6)
         domains = [h.name for h in hits if h.level == "domain"]
         tables = [h.name for h in hits if h.level == "table"]
@@ -65,7 +56,7 @@ class SchemaLinker:
             dim for dim in DIMENSION_MAP
             if any(
                 alias.lower() in query.lower()
-                for alias in [dim, *self.DIMENSION_ALIASES.get(dim, []), *EXTRA_DIMENSION_ALIASES.get(dim, [])]
+                for alias in [dim, *aliases.get(dim, []), *EXTRA_DIMENSION_ALIASES.get(dim, [])]
             )
         ]
         filters = self._filters(query)
@@ -209,9 +200,11 @@ class SemanticCompilerRouter:
             return result
         try:
             result["sql"] = self.compiler.compile(plan)
+            from governance.policy import enforce_sql
+            enforce_sql(result["sql"])
             result["metric_plan"] = plan
             result["compiled"] = True
-        except ValueError as exc:
+        except (ValueError, PermissionError) as exc:
             result["ir"]["route"] = "llm_fallback"
             result["ir"]["reasons"].append(str(exc))
         return result

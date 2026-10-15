@@ -1,0 +1,56 @@
+{
+  "version": "1",
+  "global": {
+    "min_independent_validators": 2,
+    "min_independent_scenarios": 2,
+    "min_quality": 0.8,
+    "max_error_rate": 0.1,
+    "max_clarification_rate": 0.3,
+    "forbidden_operations": ["write_sql", "drop", "delete", "shell"],
+    "planning_rules": ["先确认指标口径、时间范围和当前业务域。", "只规划只读查询。禁止不可逆操作，修复建议需独立人工审批。", "DWS 层表名必须以 dws_ 开头。"],
+    "dimension_aliases": {
+      "customer_state": ["客户州", "各州", "按州", "地区", "地域", "customer state"],
+      "seller_state": ["卖家州", "商家州", "seller state"],
+      "payment_type": ["支付方式", "支付类型", "payment type"],
+      "product_category_name": ["品类", "类目", "商品分类", "类别", "product category", "category"],
+      "year_month": ["月度", "按月", "月份", "每月", "趋势", "by month", "monthly"],
+      "Genre": ["流派", "音乐类型", "genre"],
+      "Artist": ["艺术家", "歌手", "artist"],
+      "BillingCountry": ["国家", "国别", "billing country"],
+      "BillingCity": ["城市", "billing city"]
+    },
+    "metric_aliases": {
+      "sales_revenue": ["销售额", "销售收入", "成交额", "gmv", "sales revenue"],
+      "order_count": ["订单量", "订单数", "订单", "order count"],
+      "avg_order_value": ["客单价", "平均订单金额"],
+      "repeat_customers": ["回头客", "复购客户", "复购用户"],
+      "bad_review_rate": ["差评率", "差评", "低评分"],
+      "avg_shipping_time": ["物流时长", "配送时长", "发货时长"],
+      "delay_rate": ["延迟率", "延迟发货", "延期"],
+      "payment_distribution": ["支付方式", "支付占比"],
+      "seller_count": ["卖家数", "活跃卖家"],
+      "revenue": ["收入", "营收", "revenue"],
+      "invoice_count": ["发票数", "发票量", "invoice count"],
+      "track_count": ["曲目销量", "曲目数"],
+      "genre_revenue": ["流派收入", "流派营收", "genre revenue"],
+      "artist_revenue": ["艺术家收入", "歌手收入", "artist revenue"]
+    }
+  },
+  "domains": {
+    "default": {},
+    "commerce": {
+      "allowed_tables": ["olist_orders_dataset", "olist_customers_dataset", "olist_order_items_dataset", "olist_order_payments_dataset", "olist_products_dataset", "olist_sellers_dataset", "olist_order_reviews_dataset", "product_category_name_translation"],
+      "allowed_knowledge_bases": ["commerce"],
+      "metric_meanings": {"gmv": "使用已治理 sales_revenue，不将支付额与商品销售额混为一个口径"},
+      "retrieval_weights": {"lexical": 1.0, "dense": 1.0}
+    },
+    "media": {
+      "allowed_tables": ["chinook.Invoice", "chinook.InvoiceLine", "chinook.Track", "chinook.Genre", "chinook.Album", "chinook.Artist"],
+      "allowed_knowledge_bases": ["media"],
+      "metric_meanings": {"gmv": "数字媒体收入按 UnitPrice 乘 Quantity，不采用电商销售额口径"},
+      "metric_aliases": {"revenue": ["收入", "营收", "revenue", "gmv", "成交额"]},
+      "retrieval_weights": {"lexical": 1.0, "dense": 1.0}
+    }
+  },
+  "projects": {}
+}

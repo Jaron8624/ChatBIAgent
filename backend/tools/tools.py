@@ -102,6 +102,9 @@ async def get_memory(
         layered = await managed.context(user_id, runtime.context.tenant_id,
             runtime.context.session_id, query, token_budget=1200)
         return layered  # Empty managed memory must not expose the legacy user-wide index.
+    from governance.context import current
+    if current() and current().domain != 'default':
+        raise PermissionError('domain_memory_requires_managed_mode')
     writer = get_stream_writer()
     writer(f"🔍 正在检索记忆库...")
     start_time = time.time()

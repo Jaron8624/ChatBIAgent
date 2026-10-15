@@ -38,7 +38,7 @@ class RecordedModel:
         self.calls = []
 
     async def ainvoke(self, messages):
-        result = await self.model.ainvoke(messages)
+        result = await asyncio.wait_for(self.model.ainvoke(messages),120)
         self.calls.append({'usage': result.usage_metadata,
                            'model': result.response_metadata.get('model_name')})
         return result
@@ -69,7 +69,8 @@ async def main():
         async with pool.acquire() as conn:
             await conn.execute(DDL)
             await conn.execute('''CREATE TABLE raw_conversations(id TEXT PRIMARY KEY,user_id INT,
-                tenant_id TEXT,thread_id TEXT,turn_id TEXT,role TEXT,content TEXT,created_at TIMESTAMPTZ,summary_id TEXT)''')
+                tenant_id TEXT,thread_id TEXT,turn_id TEXT,role TEXT,content TEXT,created_at TIMESTAMPTZ,summary_id TEXT,
+                domain_id TEXT NOT NULL DEFAULT 'default')''')
             await conn.execute('''CREATE TABLE nexusmind_session_registry(session_id TEXT PRIMARY KEY,
                 user_id INT,tenant_id TEXT,status TEXT)''')
         embeddings = get_embeddings()
@@ -92,7 +93,7 @@ async def main():
                    {'id': 'proof-a1', 'role': 'assistant', 'content': '好的，按月汇总，人民币。', 'created_at': now}]
             async with pool.acquire() as conn:
                 for message in raw:
-                    await conn.execute('INSERT INTO raw_conversations VALUES($1,9001,\'proof\',\'session-a\',\'turn-a\',$2,$3,$4,NULL)',
+                    await conn.execute('INSERT INTO raw_conversations VALUES($1,9001,\'proof\',\'session-a\',\'turn-a\',$2,$3,$4,NULL,\'default\')',
                                        message['id'], message['role'], message['content'], message['created_at'])
             memories = await extract_memories(raw, model)
             payload = {'user_id': 9001, 'tenant_id': 'proof', 'thread_id': 'session-a',
@@ -172,7 +173,7 @@ async def main():
             async with pool.acquire() as conn:
                 await IngestionLedger(conn).cancel_session(9001, 'proof', 'session-a')
                 await conn.execute("INSERT INTO nexusmind_session_registry VALUES('personal-flow',9001,'proof','active')")
-                await conn.execute("INSERT INTO raw_conversations VALUES('flow-u1',9001,'proof','personal-flow','flow-turn','user',$1,now(),NULL)",
+                await conn.execute("INSERT INTO raw_conversations VALUES('flow-u1',9001,'proof','personal-flow','flow-turn','user',$1,now(),NULL,'default')",
                                    '记住，我所有个人回答都喜欢用中文。')
                 ledger = IngestionLedger(conn)
                 # Reuse the actual isolated pool, not a storage double. Only the

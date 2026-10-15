@@ -20,21 +20,27 @@ def main():
     primary.add_argument("--report", type=Path, help="Verified session runtime report")
     primary.add_argument("--context-report", type=Path, help="Verified real-model context compaction report")
     primary.add_argument("--memory-report", type=Path, help="Verified managed memory integration report")
+    primary.add_argument("--governance-report", type=Path, help="Verified scoped governance runtime report")
     parser.add_argument("--audit-report", type=Path)
     parser.add_argument("--rag-report", type=Path)
     parser.add_argument("--knowledge-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--deployment-report", type=Path)
     args = parser.parse_args()
-    kind = "managed-memory" if args.memory_report else ("context-compaction" if args.context_report else "session-runtime")
-    report_path = (args.memory_report or args.context_report or args.report).resolve()
-    directory = "managed_memory" if args.memory_report else ("context_compaction" if args.context_report else "session_runtime")
+    kind = "domain-governance" if args.governance_report else ("managed-memory" if args.memory_report else ("context-compaction" if args.context_report else "session-runtime"))
+    report_path = (args.governance_report or args.memory_report or args.context_report or args.report).resolve()
+    directory = "governance_runtime" if args.governance_report else ("managed_memory" if args.memory_report else ("context_compaction" if args.context_report else "session_runtime"))
     report_path.relative_to(ROOT / "artifacts" / directory)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("status") != "passed" or not report.get("source_hashes"):
         raise RuntimeError("Cannot ship a failed runtime report")
     if args.memory_report and (not report.get("model_calls") or not report.get("embedding_dimension")):
         raise RuntimeError("Memory report lacks real model and embedding verification")
+    if args.governance_report and (report.get('execution_mode') not in {'model','deterministic'} or not report.get("embedding_dimension")
+            or len(report.get("experiments",[]))<2 or not all(e.get('gate',{}).get('passed') for e in report['experiments'])):
+        raise RuntimeError("Governance report lacks real independent integration experiments")
+    if args.governance_report and report['execution_mode']=='model' and not report.get('model_calls'):
+        raise RuntimeError("Model-mode report lacks actual model calls")
     if args.context_report:
         checks = [report.get(name) is True for name in
                   ("archived_exactly", "actual_recall_tool_called", "cross_user_denied")]

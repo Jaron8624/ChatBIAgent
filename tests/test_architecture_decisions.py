@@ -70,7 +70,8 @@ class ReleaseTests(unittest.TestCase):
         self.addCleanup(self.store.engine.dispose)
 
     def candidate(self, name, status):
-        c = CandidateSpec.build("evolution_rule", name, {"action_prompt": name})
+        # This fixture checks channel concurrency, not scoped rule eligibility.
+        c = CandidateSpec.build("agent_config", name, {"action_prompt": name})
         self.store.register_candidate(c)
         self.store.transition_candidate(c.candidate_id, CandidateStatus.EVALUATING, "test", "test")
         self.store.transition_candidate(c.candidate_id, CandidateStatus.EVALUATED, "test", "test")
