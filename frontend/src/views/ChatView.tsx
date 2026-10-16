@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, getApiContext, streamChat, type StreamEvent } from '../lib/api'
 import * as echarts from 'echarts'
+import { TraceTimeline as TraceView } from '../components/TraceTimeline'
+import type { TraceSpan } from '../lib/traceTimeline'
 
 interface ToolCall {
   tool: string
@@ -12,18 +14,6 @@ interface ReactMeta {
   tool_calls?: ToolCall[]
   forced_final?: boolean
   trace?: { round: number; thought?: string; action?: string; observation?: string }[]
-}
-
-interface TraceSpan {
-  traceId: string
-  spanId: string
-  parentId?: string
-  operationName: string
-  startTime: number
-  duration: number
-  tags: Record<string, unknown>
-  status: string
-  error?: string | null
 }
 
 interface ChatMsg {
@@ -61,58 +51,6 @@ function greeting() {
   if (h < 12) return '上午好'
   if (h < 18) return '下午好'
   return '晚上好'
-}
-
-/** MTrace 链路瀑布图 */
-function TraceView({ spans }: { spans: TraceSpan[] }) {
-  const [open, setOpen] = useState(false)
-  if (!spans?.length) return null
-  const root = spans.find((s) => !s.parentId)
-  const children = root ? spans.filter((s) => s.parentId === root.spanId) : []
-  const maxDur = Math.max(...spans.map((s) => s.duration), 1)
-
-  return (
-    <div style={{ marginTop: 10, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', background: '#fff' }}>
-      <div
-        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', background: '#f7f8fa' }}
-        onClick={() => setOpen(!open)}
-      >
-        <span style={{ width: 14, height: 14, background: 'var(--accent)', borderRadius: 3, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ color: '#fff', fontSize: 8, fontWeight: 700 }}>M</span>
-        </span>
-        <span style={{ fontSize: 12, color: 'var(--text-0)', fontWeight: 600 }}>MTrace 链路</span>
-        <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{spans.length} spans · traceId {root?.traceId?.slice(0, 8)}</span>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-2)' }}>{open ? '收起 ▴' : '展开 ▾'}</span>
-      </div>
-      {open && (
-        <div style={{ padding: '10px 12px', fontSize: 11 }}>
-          {children.map((s) => {
-            const pct = (s.duration / maxDur) * 100
-            return (
-              <div key={s.spanId} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
-                <div style={{ width: 80, textAlign: 'right', color: 'var(--text-1)', fontWeight: 500, flexShrink: 0, fontSize: 11 }}>{s.operationName}</div>
-                <div style={{ flex: 1, height: 12, background: '#f0f1f3', borderRadius: 3, position: 'relative', overflow: 'hidden' }}>
-                  <div
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      height: '100%',
-                      width: `${Math.max(pct, 2)}%`,
-                      background: s.status === 'error' ? '#dc2626' : '#2563eb',
-                      borderRadius: 3,
-                      opacity: 0.7,
-                    }}
-                  />
-                </div>
-                <div style={{ width: 50, textAlign: 'right', color: 'var(--text-2)', flexShrink: 0, fontSize: 10 }}>{s.duration}ms</div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
 }
 
 /** 实时节点进度条 */

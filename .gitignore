@@ -19,5 +19,6 @@ data/context_store/
 data/memory_files/
 data/observability/
 docker-data/
+runtime/
 backend/evolution/skills/
 *.log

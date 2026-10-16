@@ -4,8 +4,9 @@ import json
 from datetime import datetime, timezone, timedelta, date
 from sqlalchemy import select, insert
 
-from governance.schema import records, events
+from governance.schema import records, events, rule_usage
 from harness.models import EvalCase, content_hash, new_id, utc_now
+from governance.policy import knowledge_base
 
 
 def observe(service, ctx, session_id, result, query=""):
@@ -47,6 +48,16 @@ def observe(service, ctx, session_id, result, query=""):
                     payload=payload,
                 )
             )
+            for rule_id in set(payload["rules_used"]):
+                conn.execute(
+                    insert(rule_usage).values(
+                        tenant=ctx.tenant,
+                        domain=ctx.domain,
+                        event_id=rid,
+                        rule_id=rule_id,
+                        created_at=utc_now(),
+                    )
+                )
     return rid
 
 
@@ -127,6 +138,11 @@ def daily_report(service, ctx, day):
         flags.append("error_rate_degraded_vs_previous_7_days")
     if count >= 20 and clarifications / count > ctx.policy["max_clarification_rate"]:
         flags.append("clarification_rate_above_domain_redline")
+    active_rules = [r for r in rules if r["payload"].get("status") == "active"]
+    shared_count = sum(
+        r["payload"]["scope"] in {"team", "global"} for r in active_rules
+    )
+    shared_ratio = shared_count / len(active_rules) if active_rules else None
     payload = {
         "day": day.isoformat(),
         "timezone": "UTC",
@@ -143,10 +159,11 @@ def daily_report(service, ctx, day):
         if sum(r["payload"].get("irreversible_attempts", 0) for r in rows)
         else None,
         "irreversible_metric_note": "Structured SQL policy attempts only; no attempts means null, not 100%.",
-        "knowledge_promotion_rate": sum(r["payload"]["scope"] != "user" for r in rules)
-        / len(rules)
-        if rules
-        else None,
+        "active_shared_rule_ratio": shared_ratio,
+        "active_rule_count": len(active_rules),
+        "active_shared_rule_count": shared_count,
+        "knowledge_promotion_rate": shared_ratio,
+        "knowledge_promotion_rate_note": "Deprecated alias of active_shared_rule_ratio; current registry snapshot, not a daily promotion success rate.",
         "previous_7_days_error_rate": baseline,
         "degradation_flags": flags,
         "review_trace_ids": failure_ids,
@@ -246,9 +263,7 @@ def publish_cases(service, ctx, item_ids):
                 item_id,
                 {
                     "query": p["query"],
-                    "knowledge_base_id": ctx.policy.get(
-                        "allowed_knowledge_bases", ["默认知识库"]
-                    )[0],
+                    "knowledge_base_id": knowledge_base(ctx),
                 },
                 p["expected"],
                 metadata={

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
+from infra.tracing import traced_operation
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -93,9 +94,18 @@ class MCPToolServer:
             "id": None,
         }
 
+    @traced_operation("tool.call", layer="L3", stage="tool")
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """tools/call 标准响应"""
         tool = self._tools.get(name)
+        from infra.tracing import current_trace
+        tracing = current_trace()
+        active_span = tracing.current_span(tracing.root.trace_id) if tracing else None
+        if active_span:
+            active_span.tag("tool.name", name if tool else "unknown")
+            if tool:
+                active_span.tag("tool.category", tool.category)
+                active_span.tag("tool.side_effect", tool.side_effect)
         if not tool:
             return {
                 "jsonrpc": "2.0",
@@ -121,7 +131,8 @@ class MCPToolServer:
             if asyncio.iscoroutinefunction(tool.handler):
                 result = await tool.handler(**arguments)
             else:
-                result = tool.handler(**arguments)
+                from infra.async_io import run_tool
+                result = await run_tool(tool.handler, **arguments)
                 if inspect.isawaitable(result):
                     result = await result
 

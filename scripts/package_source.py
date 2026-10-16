@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--knowledge-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--deployment-report", type=Path)
+    parser.add_argument("--review-report", type=Path, help="Full-suite governance review regression receipt")
+    parser.add_argument("--monitoring-report", type=Path, help="Verified local monitoring stack readback")
     args = parser.parse_args()
     kind = "domain-governance" if args.governance_report else ("managed-memory" if args.memory_report else ("context-compaction" if args.context_report else "session-runtime"))
     report_path = (args.governance_report or args.memory_report or args.context_report or args.report).resolve()
@@ -59,6 +61,33 @@ def main():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise RuntimeError("Runtime report source does not match delivery: " + name)
     extra_reports = {}
+    if args.monitoring_report:
+        path = args.monitoring_report.resolve()
+        path.relative_to(ROOT / "artifacts")
+        monitoring = json.loads(path.read_text(encoding="utf-8"))
+        if (monitoring.get("status") != "passed" or not monitoring.get("checks")
+                or not all(c.get("passed") for c in monitoring["checks"])
+                or not monitoring.get("backend_source_hashes")):
+            raise RuntimeError("Cannot ship an incomplete monitoring receipt")
+        for name, expected in monitoring['backend_source_hashes'].items():
+            if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
+                raise RuntimeError("Monitoring receipt source does not match delivery: " + name)
+        extra_reports['observability-stack'] = path.read_bytes()
+    if args.review_report:
+        path = args.review_report.resolve()
+        relative = path.relative_to(ROOT / "artifacts")
+        if not relative.parts[0].startswith("governance_review_"):
+            raise RuntimeError("Review report must belong to the governance review artifact directory")
+        review = json.loads(path.read_text(encoding="utf-8"))
+        if (review.get("status") != "passed" or not review.get("tests")
+                or review.get("failures") or review.get("errors")
+                or not review.get("preimport_real_pg_session_tests_passed")
+                or not review.get("undefined_name_check_passed") or not review.get("source_hashes")):
+            raise RuntimeError("Cannot ship a failed or incomplete review receipt")
+        for name, expected in review["source_hashes"].items():
+            if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
+                raise RuntimeError("Review receipt source does not match delivery: " + name)
+        extra_reports["governance-review"] = path.read_bytes()
     for label, value, directory in (("module-audit", args.audit_report, "module_audit"),
                                     ("rag-filter-runtime", args.rag_report, "rag_filter_runtime"),
                                     ("knowledge-runtime", args.knowledge_report, "knowledge_runtime"),

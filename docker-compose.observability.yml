@@ -1,0 +1,95 @@
+# Optional overlay: python scripts/deploy.py --init --observability
+# Then: python scripts/deploy.py --observability [--production]
+# Local single-node monitoring, not a cross-zone HA deployment.
+services:
+  backend:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      METRICS_BEARER_TOKEN_FILE: /run/secrets/metrics_token
+    secrets: [metrics_token]
+  otel-collector:
+    # Official GHCR distribution; override when a deployment uses Docker Hub.
+    image: ${OTEL_COLLECTOR_IMAGE:-ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.162.0}
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/collector.yaml:/etc/otelcol/config.yaml:ro
+      - nexusmind_otel_queue:/var/lib/otelcol
+    ports: ["127.0.0.1:4318:4318"]
+    depends_on:
+      observability-init:
+        condition: service_completed_successfully
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    mem_limit: 512m
+  observability-init:
+    # Collector runs as 10001 and its scratch image cannot prepare a new
+    # volume. Initialize only this project's dedicated queue volume, once.
+    image: postgres:16-alpine
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown 10001:10001 /var/lib/otelcol && chmod 0700 /var/lib/otelcol"]
+    volumes:
+      - nexusmind_otel_queue:/var/lib/otelcol
+    network_mode: none
+    restart: "no"
+    mem_limit: 32m
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-target=all", "-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo.yaml:ro
+      - nexusmind_tempo:/var/tempo
+    ports: ["127.0.0.1:3200:3200"]
+    restart: unless-stopped
+    mem_limit: 1g
+  prometheus:
+    image: quay.io/prometheus/prometheus:v3.15.0
+    command: ["--config.file=/etc/prometheus/prometheus.yaml", "--storage.tsdb.retention.time=15d", "--enable-feature=exemplar-storage"]
+    volumes:
+      - ./deploy/observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./deploy/observability/alerts.yaml:/etc/prometheus/alerts.yaml:ro
+      - nexusmind_prometheus:/prometheus
+    secrets: [metrics_token]
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [alertmanager]
+    restart: unless-stopped
+    mem_limit: 512m
+  alertmanager:
+    image: quay.io/prometheus/alertmanager:v0.34.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yaml"]
+    volumes:
+      - ./deploy/observability/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml:ro
+      - nexusmind_alertmanager:/alertmanager
+    ports: ["127.0.0.1:9093:9093"]
+    restart: unless-stopped
+    mem_limit: 128m
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    secrets: [grafana_password]
+    volumes:
+      - ./deploy/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/nexusmind.yaml:ro
+      - ./deploy/observability/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/nexusmind.yaml:ro
+      - ./deploy/observability/dashboard.json:/etc/grafana/dashboards/nexusmind.json:ro
+      - nexusmind_grafana:/var/lib/grafana
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus, tempo]
+    restart: unless-stopped
+    mem_limit: 512m
+secrets:
+  metrics_token:
+    file: ${OBSERVABILITY_METRICS_TOKEN_FILE:-./runtime/observability-secrets/metrics-token}
+  grafana_password:
+    file: ${OBSERVABILITY_GRAFANA_PASSWORD_FILE:-./runtime/observability-secrets/grafana-password}
+volumes:
+  nexusmind_otel_queue:
+  nexusmind_tempo:
+  nexusmind_prometheus:
+  nexusmind_alertmanager:
+  nexusmind_grafana:

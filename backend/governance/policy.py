@@ -4,9 +4,66 @@ import hashlib
 import json
 import os
 import re
+import copy
+import logging
+from threading import RLock
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parents[2] / "docs/knowledge/business_policies.json"
+_cache = {}
+_cache_lock = RLock()
+logger = logging.getLogger(__name__)
+
+
+def _configuration():
+    path = Path(os.getenv("BUSINESS_POLICY_PATH", str(PATH))).resolve()
+    with _cache_lock:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns)
+        previous = _cache.get(str(path))
+        if previous and previous[0] == stamp:
+            return previous[1]
+        config = json.loads(path.read_text(encoding="utf-8"))
+        validate(config["global"])
+        for item in config["domains"].values():
+            validate(item)
+        after = path.stat()
+        if stamp != (after.st_mtime_ns, after.st_size, after.st_ctime_ns):
+            raise ValueError("business_policy_changed_during_read")
+        _cache.clear()  # bounded, and malformed reloads never serve stale policy
+        _cache[str(path)] = (stamp, config)
+        return config
+
+
+def knowledge_base(ctx, requested=None):
+    allowed = ctx.policy.get("allowed_knowledge_bases")
+    if requested is not None:
+        if not isinstance(requested, str) or not requested.strip():
+            raise ValueError("invalid_knowledge_base")
+        if allowed is not None and requested not in allowed:
+            raise PermissionError("knowledge_base_outside_business_domain")
+        return requested
+    default = ctx.policy.get("default_knowledge_base")
+    if default is not None:
+        return knowledge_base(ctx, default)
+    if allowed is None:
+        return "默认知识库"
+    if len(allowed) == 1:
+        return knowledge_base(ctx, allowed[0])
+    raise ValueError("business_domain_requires_explicit_knowledge_base")
+
+
+def validate_checkpoint(values, ctx):
+    if not ctx:
+        return
+    if ctx.domain != "default" and not values.get("business_domain"):
+        raise PermissionError("ungoverned_checkpoint_restart_required")
+    if values.get("business_domain") not in {None, ctx.domain}:
+        raise PermissionError("checkpoint_business_domain_mismatch")
+    if ctx.domain != "default" and not values.get("policy_hash"):
+        raise PermissionError("ungoverned_checkpoint_restart_required")
+    if values.get("policy_hash") and values["policy_hash"] != ctx.policy_hash:
+        raise PermissionError("business_policy_changed_restart_required")
 
 
 def name(value, empty=False):
@@ -108,13 +165,22 @@ def validate(policy):
         not isinstance(k, str) or not isinstance(v, str) for k, v in meanings.items()
     ):
         raise ValueError("invalid_metric_meanings")
+    if "default_knowledge_base" in policy and (
+        not isinstance(policy["default_knowledge_base"], str)
+        or not policy["default_knowledge_base"].strip()
+        or (
+            "allowed_knowledge_bases" in policy
+            and policy["default_knowledge_base"]
+            not in policy["allowed_knowledge_bases"]
+        )
+    ):
+        raise ValueError("default_knowledge_base_outside_allowlist")
 
 
 def resolve(domain="default", project="", override=None):
     name(domain)
     name(project, empty=True)
-    path = Path(os.getenv("BUSINESS_POLICY_PATH", str(PATH)))
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = _configuration()
     if domain not in config["domains"] and override is None:
         raise PermissionError("unknown_business_domain")
     result = merge(config["global"], config["domains"].get(domain, {}))
@@ -131,7 +197,7 @@ def resolve(domain="default", project="", override=None):
     digest = hashlib.sha256(
         json.dumps(result, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
-    return result, digest
+    return copy.deepcopy(result), digest
 
 
 def prompt(ctx):
@@ -160,6 +226,10 @@ def enforce_sql(sql, ctx=None):
 
     ctx = ctx or current()
     if not ctx:
+        if os.getenv("NEXUSMIND_ENV") == "production":
+            logger.warning("sql_governance_missing_context denied=true")
+            raise PermissionError("sql_requires_business_context")
+        logger.warning("sql_governance_missing_context mode=offline_compatibility")
         return
     import sqlglot
     from sqlglot import expressions as exp

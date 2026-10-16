@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: NexusMind
+    folder: NexusMind
+    type: file
+    options:
+      path: /etc/grafana/dashboards

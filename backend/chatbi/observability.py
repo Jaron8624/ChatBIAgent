@@ -70,6 +70,12 @@ class TraceStore:
             "latency_ms": result.get("latency_ms", 0), "model": result.get("model_used", ""),
             "tool_results": len(result.get("mcp_results", [])), "retry_count": result.get("retry_count", 0),
             "status": status, "error": result.get("error_info", ""),
+            "usage": result.get("usage", {}),
+            "tokens_consumed": result.get("tokens_consumed", 0),
+            "estimated_cost": result.get("estimated_cost", 0),
+            "usage_available": result.get("usage_available", False),
+            "first_answer_ms": result.get("first_answer_ms"),
+            "release_mode": (result.get("release") or {}).get("release_mode", "baseline"),
         }
         safe_record = self._redact(record)
         self._append(self.trace_path, safe_record)

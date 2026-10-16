@@ -70,6 +70,11 @@ def prepare_olist() -> None:
 
 
 def main() -> None:
+    # Compose mounts the demo database directory read-only in API/worker,
+    # with a separate writable uploads volume below it. OCI cannot create
+    # a missing child mountpoint inside an already read-only parent mount.
+    # Prepare the empty mountpoint while migration holds the writable volume.
+    (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     prepare_chinook()
     prepare_olist()
 

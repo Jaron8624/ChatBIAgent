@@ -59,7 +59,7 @@ class InProcessAgentExecutor:
                     tenant_id=principal.tenant if principal else str(case.metadata.get('tenant_id','default')),
                     domain_id=principal.domain if principal else case.metadata.get('domain_id'),
                     session_id=session_id,
-                    knowledge_base_id=str(case.input.get("knowledge_base_id", "默认知识库")),
+                    knowledge_base_id=case.input.get("knowledge_base_id"),
                     messages=list(case.input.get("messages") or []),
                 ),
                 timeout=self.timeout_seconds,

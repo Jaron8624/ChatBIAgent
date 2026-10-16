@@ -26,6 +26,7 @@ from typing import Dict, Any, List
 
 from langchain_openai import ChatOpenAI  # noqa: F401 保留，便于回退 LLM_PROVIDER
 from infra.llm_provider import create_chat_model
+from infra.tracing import span_scope
 
 logger = logging.getLogger(__name__)
 
@@ -161,99 +162,101 @@ class ReActAgent:
         i = max(0, next_iteration - 1)
 
         def bounded_prompt(instructions, suffix):
-            from core.context_manager import ToolResultTruncator, fit_prompt_context, get_synthesis_input_budget
-            context = f"历史参考：\n{history_text}\n此前的工具调用与结果：\n{observation}"
-            prompt = f"用户问题：{query}\n\n{context}\n\n{suffix}"
-            budget = get_synthesis_input_budget() - ToolResultTruncator.estimate_tokens(instructions) - 32
-            return fit_prompt_context(prompt, context, budget=budget)
+            with span_scope("context.assemble", stage="context"):
+                from core.context_manager import ToolResultTruncator, fit_prompt_context, get_synthesis_input_budget
+                context = f"历史参考：\n{history_text}\n此前的工具调用与结果：\n{observation}"
+                prompt = f"用户问题：{query}\n\n{context}\n\n{suffix}"
+                budget = get_synthesis_input_budget() - ToolResultTruncator.estimate_tokens(instructions) - 32
+                return fit_prompt_context(prompt, context, budget=budget)
 
         for i in range(next_iteration, max_iterations + 1):
-            user_prompt = bounded_prompt(system, f"（第 {i}/{max_iterations} 轮）请输出 JSON 决定下一步。")
+            with span_scope("agent.turn", stage="react_loop", attributes={"iteration": i}):
+                user_prompt = bounded_prompt(system, f"（第 {i}/{max_iterations} 轮）请输出 JSON 决定下一步。")
 
-            try:
-                resp = await self.model.ainvoke([
-                    ("system", system), ("human", user_prompt),
-                ])
-                decision = self._parse(resp.content)
-                if not isinstance(decision, dict) or decision.get("action") not in {"tool", "final"}:
-                    raise ValueError("无效的 ReAct 动作")
-            except Exception as e:
-                logger.error(f"ReAct 第 {i} 轮解析失败: {e}")
-                # 解析失败：若有观察结果就基于现有信息强制总结
-                if observation:
-                    termination_reason = "parse_error"
-                    break
-                return {
-                    "answer": "抱歉，处理您的问题时出现内部错误，请稍后再试。",
-                    "iterations": i,
-                    "tool_calls": tool_calls_log,
-                    "trace": trace,
-                    "termination_reason": "parse_error",
-                }
+                try:
+                    resp = await self.model.ainvoke([
+                        ("system", system), ("human", user_prompt),
+                    ])
+                    decision = self._parse(resp.content)
+                    if not isinstance(decision, dict) or decision.get("action") not in {"tool", "final"}:
+                        raise ValueError("无效的 ReAct 动作")
+                except Exception as e:
+                    logger.error(f"ReAct 第 {i} 轮解析失败: {e}")
+                    # 解析失败：若有观察结果就基于现有信息强制总结
+                    if observation:
+                        termination_reason = "parse_error"
+                        break
+                    return {
+                        "answer": "抱歉，处理您的问题时出现内部错误，请稍后再试。",
+                        "iterations": i,
+                        "tool_calls": tool_calls_log,
+                        "trace": trace,
+                        "termination_reason": "parse_error",
+                    }
 
-            thought = decision.get("thought", "")
-            trace.append({"iteration": i, "thought": thought,
-                          "action": decision.get("action")})
+                thought = decision.get("thought", "")
+                trace.append({"iteration": i, "thought": thought,
+                              "action": decision.get("action")})
 
-            # 最终答案分支
-            if decision.get("action") == "final":
-                return {
-                    "answer": decision.get("answer", ""),
-                    "iterations": i,
-                    "tool_calls": tool_calls_log,
-                    "trace": trace,
-                    "termination_reason": "final",
-                }
+                # 最终答案分支
+                if decision.get("action") == "final":
+                    return {
+                        "answer": decision.get("answer", ""),
+                        "iterations": i,
+                        "tool_calls": tool_calls_log,
+                        "trace": trace,
+                        "termination_reason": "final",
+                    }
 
-            # 工具调用分支
-            tool_name = decision.get("tool", "")
-            args = decision.get("args", {}) or {}
-            logger.info(f"ReAct 第 {i} 轮调用工具: {tool_name} args={args}")
+                # 工具调用分支
+                tool_name = decision.get("tool", "")
+                args = decision.get("args", {}) or {}
+                logger.info(f"ReAct 第 {i} 轮调用工具: {tool_name} args={args}")
 
-            sig = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
-            if sig in called_tools:
-                observation += (
-                    f"\n[系统提示] 工具 {tool_name} 参数 {args} 已调用过，"
-                    f"禁止重复调用，请基于已有结果决策或给出最终答案。\n"
-                )
-                continue
-            if not isinstance(args, dict) or tool_name not in {t.name for t in tools}:
-                observation += "\n[工具校验失败] 工具未注册或参数不是对象，请重新决策。\n"
-                continue
-            tool_def = next(t for t in tools if t.name == tool_name)
-            event = {"call_id": uuid.uuid4().hex, "tool": tool_name, "args": args,
-                "signature": sig, "ok": False, "status": "started",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "side_effect": getattr(tool_def, "side_effect", "unknown")}
-            tool_calls_log.append(event)
-            next_iteration = i
-            await persist()  # Durable intent before invoking any potentially mutating tool.
-            started = time.perf_counter()
-            try:
-                result = await tool_executor(tool_name, args)
-                event.update(ok=True, status="success", result=result)
-                called_tools.add(sig)
-            except Exception as e:
-                event.update(status="error" if event["side_effect"] == "read_only" else "uncertain", error=str(e))
-            event.update(duration_ms=round((time.perf_counter() - started) * 1000, 3),
-                         finished_at=datetime.now(timezone.utc).isoformat())
-            next_iteration = i + 1
-            # Save the complete output before preparing the budget-limited model view.
-            await persist()
-            if event["status"] == "uncertain":
-                raise ToolExecutionUncertain("工具返回异常，无法确认副作用，需核对后再继续")
-            if event["ok"]:
-                view = result_formatter(result) if result_formatter else str(result)
-                observation += (
-                    f"\n--- 工具 {tool_name}({args}) 返回 ---\n"
-                    f"{view}\n"
-                )
-                trace[-1]["tool_result_preview"] = str(result)[:200]
-            else:
-                observation += (
-                    f"\n--- 工具 {tool_name}({args}) 执行失败 ---\n{event['error']}\n"
-                )
-            await persist()
+                sig = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                if sig in called_tools:
+                    observation += (
+                        f"\n[系统提示] 工具 {tool_name} 参数 {args} 已调用过，"
+                        f"禁止重复调用，请基于已有结果决策或给出最终答案。\n"
+                    )
+                    continue
+                if not isinstance(args, dict) or tool_name not in {t.name for t in tools}:
+                    observation += "\n[工具校验失败] 工具未注册或参数不是对象，请重新决策。\n"
+                    continue
+                tool_def = next(t for t in tools if t.name == tool_name)
+                event = {"call_id": uuid.uuid4().hex, "tool": tool_name, "args": args,
+                    "signature": sig, "ok": False, "status": "started",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "side_effect": getattr(tool_def, "side_effect", "unknown")}
+                tool_calls_log.append(event)
+                next_iteration = i
+                await persist()  # Durable intent before invoking any potentially mutating tool.
+                started = time.perf_counter()
+                try:
+                    result = await tool_executor(tool_name, args)
+                    event.update(ok=True, status="success", result=result)
+                    called_tools.add(sig)
+                except Exception as e:
+                    event.update(status="error" if event["side_effect"] == "read_only" else "uncertain", error=str(e))
+                event.update(duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                             finished_at=datetime.now(timezone.utc).isoformat())
+                next_iteration = i + 1
+                # Save the complete output before preparing the budget-limited model view.
+                await persist()
+                if event["status"] == "uncertain":
+                    raise ToolExecutionUncertain("工具返回异常，无法确认副作用，需核对后再继续")
+                if event["ok"]:
+                    view = result_formatter(result) if result_formatter else str(result)
+                    observation += (
+                        f"\n--- 工具 {tool_name}({args}) 返回 ---\n"
+                        f"{view}\n"
+                    )
+                    trace[-1]["tool_result_preview"] = str(result)[:200]
+                else:
+                    observation += (
+                        f"\n--- 工具 {tool_name}({args}) 执行失败 ---\n{event['error']}\n"
+                    )
+                await persist()
 
         # 迭代耗尽：基于已有观察强制总结
         logger.warning(f"ReAct 达到迭代上限 {max_iterations}，强制总结")

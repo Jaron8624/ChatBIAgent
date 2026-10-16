@@ -179,13 +179,14 @@ def register_governance_api(router):
                     service.promote, ctx, rid, b["scope"], b["expected_version"]
                 )
             if operation == "evaluate":
+                if ctx.role not in {"reviewer", "owner"}:
+                    raise PermissionError("domain_reviewer_required")
                 from harness.runner import ExperimentRunner
                 from harness.executors import InProcessAgentExecutor
                 from harness.evaluators import AgentProcessEvaluator, LLMJudgeEvaluator
                 from harness.gate import GateEngine
                 from harness.preflight import PreflightChecker
                 from harness.models import CandidateSpec, GatePolicy
-                from api import get_orchestrator, get_evaluator
 
                 row = await run_blocking(service.rule, ctx, rid)
                 candidate = await run_blocking(
@@ -212,6 +213,8 @@ def register_governance_api(router):
                     version=candidate["version"],
                     candidate_id=candidate["candidate_id"],
                 )
+                from api import get_orchestrator, get_evaluator
+
                 runner = ExperimentRunner(
                     service.harness,
                     InProcessAgentExecutor(get_orchestrator()),

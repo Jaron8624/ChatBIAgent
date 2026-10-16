@@ -317,7 +317,8 @@ class HarnessStore:
                 raise RuntimeError("run_explicit_harness_migration_first")
         else:
             metadata.create_all(self.engine)
-            governance_metadata.create_all(self.engine)
+            from governance.schema import migrate
+            migrate(self.engine)
 
     @staticmethod
     def _default_database_url() -> str:
@@ -872,12 +873,30 @@ class HarnessStore:
         stmt = (
             select(gate_decisions)
             .where(gate_decisions.c.candidate_id == candidate_id)
-            .order_by(gate_decisions.c.created_at.desc())
+            .order_by(gate_decisions.c.created_at.desc(), gate_decisions.c.decision_id.desc())
             .limit(1)
         )
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return dict(row) if row else None
+
+    def get_release_states(self, candidate_ids):
+        """Two queries per bounded batch, with the same latest-Gate semantics."""
+        ids = list(dict.fromkeys(x for x in candidate_ids if x))
+        result = {}
+        with self.engine.connect() as conn:
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset:offset + 400]
+                for row in conn.execute(select(candidates).where(candidates.c.candidate_id.in_(batch))).mappings():
+                    result[row["candidate_id"]] = {"candidate": dict(row), "gate": None}
+                ranked = select(gate_decisions, func.row_number().over(
+                    partition_by=gate_decisions.c.candidate_id,
+                    order_by=(gate_decisions.c.created_at.desc(), gate_decisions.c.decision_id.desc()),
+                ).label("gate_rank")).where(gate_decisions.c.candidate_id.in_(batch)).subquery()
+                for row in conn.execute(select(ranked).where(ranked.c.gate_rank == 1)).mappings():
+                    if row["candidate_id"] in result:
+                        result[row["candidate_id"]]["gate"] = dict(row)
+        return result
 
     def get_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         with self.engine.connect() as conn:

@@ -526,7 +526,7 @@ async def chat_orchestrate(
     user_id = user_info["user_id"]
     tenant_id = user_info["tenant_id"]
     session_id = body.get("session_id", f"{user_id}")
-    knowledge_base_id = body.get("knowledge_base_id", "默认知识库")
+    knowledge_base_id = body.get("knowledge_base_id")
     messages = _sanitize_client_messages(body.get("messages", []))
 
     if not query:
@@ -589,6 +589,10 @@ async def chat_orchestrate(
             raise HTTPException(status_code=409, detail=str(e))
         if isinstance(e, PermissionError):
             raise HTTPException(status_code=409, detail=str(e))
+        if isinstance(e, ValueError) and str(e) in {
+            'invalid_knowledge_base', 'business_domain_requires_explicit_knowledge_base'
+        }:
+            raise HTTPException(status_code=400, detail=str(e))
         logger.error(f"编排对话失败: {e}", exc_info=True)
         monitor.record("orchestrator", 0, False, tokens=0)
         raise HTTPException(status_code=500, detail=f"对话处理失败: {str(e)}")
@@ -615,7 +619,7 @@ async def chat_orchestrate_stream(
     user_id = user_info["user_id"]
     tenant_id = user_info["tenant_id"]
     session_id = body.get("session_id", f"{user_id}")
-    knowledge_base_id = body.get("knowledge_base_id", "默认知识库")
+    knowledge_base_id = body.get("knowledge_base_id")
     messages = _sanitize_client_messages(body.get("messages", []))
 
     if not query:
@@ -744,6 +748,12 @@ async def chat_orchestrate_stream(
                         await asyncio.sleep(0.03)
 
             # 发送 trace 数据
+            # Refresh after fallback answer delivery so the frontend receives
+            # the real first-answer timestamp, not an early graph snapshot.
+            from infra.tracing import current_trace
+            request_trace = current_trace()
+            if request_trace:
+                request_trace.attach(final_result)
             if final_result.get("spans"):
                 yield f"data: {json.dumps({'type': 'trace', 'spans': final_result['spans']}, ensure_ascii=False)}\n\n"
 
@@ -1169,16 +1179,23 @@ def get_evolution_engine() -> SelfEvolutionEngine:
 @router.get("/evolution/rules")
 async def get_evolution_rules(
     status: Optional[str] = None,
+    domain_id: Optional[str] = None,
     user_info: dict = Depends(require_permission(Permission.VIEW_EVALUATION))
 ):
     """获取进化规则列表"""
-    engine = get_evolution_engine()
+    engine = await run_blocking(get_evolution_engine)
     if status == "pending":
-        rules = engine.get_pending_rules()
+        rules = await run_blocking(engine.get_pending_rules)
     else:
-        rules = engine.get_all_rules()
-    rules=[r for r in rules if r.get('tenant_id')==user_info['tenant_id'] and
-           (r.get('owner_id')==user_info['user_id'] or (r.get('scope')=='global' and r.get('domain_id')=='default'))]
+        rules = await run_blocking(engine.get_all_rules)
+    from governance.service import get_governance
+    from governance.context import permits
+    try:
+        service = await run_blocking(get_governance)
+        ctx = await run_blocking(service.context, user_info['tenant_id'], user_info['user_id'], domain_id)
+    except PermissionError as error:
+        raise HTTPException(403, str(error))
+    rules = [r for r in rules if permits(r, ctx)]
     return {"success": True, "rules": rules}
 
 

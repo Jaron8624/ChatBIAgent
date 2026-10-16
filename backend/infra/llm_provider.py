@@ -50,6 +50,10 @@ def create_chat_model(model_name: Optional[str] = None,
     from langchain_openai import ChatOpenAI
     from infra.llm_usage import UsageCallback
 
+    # Custom OpenAI-compatible base URLs otherwise often omit streamed usage.
+    # Unsupported providers can disable this explicitly; missing usage stays unknown.
+    kwargs.setdefault("stream_usage", os.getenv("LLM_STREAM_USAGE", "true").lower() in {"1", "true", "yes"})
+
     configured_callbacks = kwargs.pop("callbacks", None) or []
     callbacks = list(configured_callbacks)
     if not any(isinstance(item, UsageCallback) for item in callbacks):

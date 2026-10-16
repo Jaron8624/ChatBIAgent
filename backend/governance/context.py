@@ -20,6 +20,30 @@ class BusinessContext:
 
 
 _context = ContextVar("business_domain_context", default=None)
+_request_context = ContextVar("resolved_business_request", default=None)
+
+
+@contextmanager
+def resolved_request(value, session_id, requested_domain=None, requested_project=""):
+    binding = (
+        value.tenant,
+        value.user_id,
+        requested_domain,
+        requested_project,
+        session_id,
+    )
+    token = _request_context.set((binding, value))
+    try:
+        yield value
+    finally:
+        _request_context.reset(token)
+
+
+def matching_request(tenant, user, domain, project, session):
+    resolved = _request_context.get()
+    if resolved and resolved[0] == (tenant, user, domain, project, session):
+        return resolved[1]
+    return None
 
 
 def current():

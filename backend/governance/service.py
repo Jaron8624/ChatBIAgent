@@ -3,9 +3,9 @@
 import hashlib
 import json
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, insert, update
+from sqlalchemy import select, insert, update, func, case
 
-from governance.schema import records, members, evidence, events
+from governance.schema import records, members, evidence, events, rule_usage
 from governance.context import BusinessContext, permits
 from governance import policy
 from harness.models import content_hash, new_id, utc_now
@@ -502,6 +502,7 @@ class GovernanceService:
                         records.c.tenant == ctx.tenant,
                         records.c.domain == ctx.domain,
                         records.c.kind == "rule",
+                        records.c.payload["status"].as_string() == "active",
                     )
                 )
                 .mappings()
@@ -509,14 +510,18 @@ class GovernanceService:
             )
         result = []
         now = datetime.now(timezone.utc)
-        for row in rows:
+        visible = [row for row in rows if permits(row["payload"], ctx)]
+        releases = self.harness.get_release_states(
+            row["payload"].get("harness_candidate_id", "") for row in visible
+        )
+        for row in visible:
             rule = row["payload"]
             if rule["status"] != "active" or not permits(rule, ctx):
                 continue
             # The governance view may not resurrect a release that the
             # existing Harness has rejected or rolled back.
-            candidate = self.harness.get_candidate(rule.get("harness_candidate_id", ""))
-            gate = self.harness.get_latest_gate(rule.get("harness_candidate_id", ""))
+            release = releases.get(rule.get("harness_candidate_id", ""), {})
+            candidate, gate = release.get("candidate"), release.get("gate")
             if (
                 not candidate
                 or candidate["status"] not in {"evaluated", "shadow", "active"}
@@ -628,15 +633,40 @@ class GovernanceService:
                 .mappings()
                 .all()
             )
-            calls = (
-                conn.execute(
-                    select(events).where(
-                        events.c.tenant == ctx.tenant, events.c.domain == ctx.domain
+            totals = {
+                row.rule_id: row
+                for row in conn.execute(
+                    select(
+                        rule_usage.c.rule_id,
+                        func.count().label("calls"),
+                        func.sum(
+                            case(
+                                (
+                                    (
+                                        rule_usage.c.created_at
+                                        >= utc_now()[:10] + "T00:00:00+00:00"
+                                    )
+                                    & (
+                                        rule_usage.c.created_at
+                                        < (
+                                            datetime.now(timezone.utc).date()
+                                            + timedelta(days=1)
+                                        ).isoformat()
+                                        + "T00:00:00+00:00"
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ).label("calls_today"),
                     )
+                    .where(
+                        rule_usage.c.tenant == ctx.tenant,
+                        rule_usage.c.domain == ctx.domain,
+                    )
+                    .group_by(rule_usage.c.rule_id)
                 )
-                .mappings()
-                .all()
-            )
+            }
         return [
             {
                 "id": r["id"],
@@ -645,14 +675,10 @@ class GovernanceService:
                 "contributors": r["payload"]["contributors"],
                 "source_sessions": r["payload"]["source_sessions"],
                 "source_traces": r["payload"]["source_traces"],
-                "calls": sum(
-                    r["id"] in e["payload"].get("rules_used", []) for e in calls
-                ),
-                "calls_today": sum(
-                    r["id"] in e["payload"].get("rules_used", [])
-                    and e["created_at"][:10] == utc_now()[:10]
-                    for e in calls
-                ),
+                "calls": totals[r["id"]].calls if r["id"] in totals else 0,
+                "calls_today": int(totals[r["id"]].calls_today)
+                if r["id"] in totals
+                else 0,
             }
             for r in rules
             if r["payload"]["owner_id"] == ctx.user_id or ctx.role == "owner"

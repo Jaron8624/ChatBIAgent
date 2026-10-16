@@ -107,6 +107,25 @@ class GovernanceAPITests(unittest.TestCase):
             self.client.get("/governance/commerce/contributions").status_code, 403
         )
 
+    def test_member_cannot_start_evaluation_or_access_paid_dependencies(self):
+        self.service.grant("acme", 7, "commerce", 8, "member")
+        self.app.state.principal = {"user_id": 8, "tenant_id": "acme", "role": "viewer"}
+        with patch.object(self.service, "rule") as lookup:
+            result = self.client.post("/governance/commerce/rules/r/evaluate", json={})
+        self.assertEqual(result.status_code, 403)
+        self.assertIn("domain_reviewer_required", result.text)
+        lookup.assert_not_called()
+
+    def test_reviewer_can_reach_evaluation_validation(self):
+        self.service.grant("acme", 7, "commerce", 8, "reviewer")
+        self.app.state.principal = {"user_id": 8, "tenant_id": "acme", "role": "viewer"}
+        with patch.object(
+            self.service, "rule", side_effect=KeyError("missing")
+        ) as lookup:
+            result = self.client.post("/governance/commerce/rules/r/evaluate", json={})
+        self.assertEqual(result.status_code, 404)
+        lookup.assert_called_once()
+
     def test_model_catalog_rejects_missing_model_before_experiment(self):
         from harness.preflight import PreflightChecker
         from unittest.mock import Mock

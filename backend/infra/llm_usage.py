@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextvars
 import os
+import time
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -107,13 +109,95 @@ def current_tracker() -> Optional[UsageTracker]:
     return _active_tracker.get()
 
 
+def attach_current_usage(result):
+    """Attach usage before session/TraceStore persistence, not only in the API."""
+    tracker = current_tracker()
+    if tracker is None:
+        return result
+    usage = tracker.snapshot()
+    if usage["calls"] == 0 and result.get("usage_available"):
+        usage.update(complete=True, usage_complete=True, cost_complete=True)
+    result.update(usage=usage, usage_available=bool(usage["complete"]),
+                  tokens_consumed=usage["total_tokens"], estimated_cost=usage["estimated_cost"],
+                  model_call_count=usage["calls"])
+    return result
+
+
 class UsageCallback(BaseCallbackHandler):
     """LangChain callback that records every child model call in one request."""
 
+    # LangChain otherwise dispatches sync callbacks to an executor. Inline
+    # callbacks retain the exact graph-task context and do no blocking I/O.
+    run_inline = True
+
+    def __init__(self):
+        self._runs = {}
+        self._lock = threading.Lock()
+
+    def _start(self, serialized, run_id, kwargs):
+        from infra.tracing import current_trace
+        session = current_trace()
+        if session is None:
+            return
+        options = kwargs.get("invocation_params") or {}
+        model = str(options.get("model") or options.get("model_name") or
+                    (serialized or {}).get("kwargs", {}).get("model_name") or "unknown")
+        with self._lock:
+            self._runs = {key: value for key, value in self._runs.items()
+                          if value["span"] is not None and value["span"].end_time_ms is None}
+            if str(run_id) in self._runs or len(self._runs) >= 1024:
+                return
+            span = session.detached_span("llm.request", layer="L3", stage="llm",
+                                         attributes={"gen_ai.request.model": model})
+            if span is not None:
+                self._runs[str(run_id)] = {"span": span, "started": time.perf_counter(),
+                                           "first": None, "model": model}
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        self._start(serialized, run_id, kwargs)
+
+    def on_llm_start(self, serialized, prompts, *, run_id, **kwargs):
+        self._start(serialized, run_id, kwargs)
+
+    def on_llm_new_token(self, token, *, run_id, **kwargs):
+        message = getattr(kwargs.get("chunk"), "message", None)
+        tool_chunks = getattr(message, "tool_call_chunks", None) or []
+        tool_delta = any(isinstance(item, dict) and any(item.get(key) for key in ("name", "args", "id"))
+                         for item in tool_chunks)
+        reasoning = (getattr(message, "additional_kwargs", None) or {}).get("reasoning_content", "")
+        if not ((isinstance(token, str) and token.strip()) or tool_delta or reasoning):
+            return
+        with self._lock:
+            run = self._runs.get(str(run_id))
+            if run is None or run["first"] is not None:
+                return
+            run["first"] = max(0.0, (time.perf_counter() - run["started"]) * 1000)
+            run["span"].tag("llm.ttft_ms", run["first"])
+            from infra.telemetry_metrics import LLM_TTFT
+            LLM_TTFT.observe(run["first"] / 1000, exemplar={"trace_id": run["span"].trace_id})
+
+    def _finish(self, run_id, usage=None, error=None):
+        from infra.telemetry_metrics import LLM_CALLS, LLM_TOKENS
+        with self._lock:
+            run = self._runs.pop(str(run_id), None)
+        LLM_CALLS.labels("error" if error is not None else "ok").inc()
+        usage = usage or {}
+        for direction, keys in (("input", ("prompt_tokens", "input_tokens", "prompt_token_count")),
+                                ("output", ("completion_tokens", "output_tokens", "completion_token_count"))):
+            value = _first(usage, *keys)
+            if value is not None and value >= 0:
+                LLM_TOKENS.labels(direction).inc(value)
+                if run:
+                    run["span"].tag(f"gen_ai.usage.{direction}_tokens", int(value))
+        if run:
+            if error is not None:
+                run["span"].tag("error.type", type(error).__name__)
+            run["span"].finish("error" if error is not None else "ok",
+                                 type(error).__name__ if error is not None else None)
+        return run["model"] if run else ""
+
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         tracker = current_tracker()
-        if tracker is None:
-            return
         usage: Dict[str, Any] = {}
         llm_output = getattr(response, "llm_output", None) or {}
         if isinstance(llm_output, dict):
@@ -125,9 +209,12 @@ class UsageCallback(BaseCallbackHandler):
             if isinstance(metadata, dict):
                 usage = dict(metadata.get("token_usage") or metadata.get("usage") or metadata)
         model = str(llm_output.get("model_name", "")) if isinstance(llm_output, dict) else ""
-        tracker.record(usage, model=model)
+        requested = self._finish(kwargs.get("run_id"), usage=usage)
+        if tracker is not None:
+            tracker.record(usage, model=model or requested)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        self._finish(kwargs.get("run_id"), error=error)
         tracker = current_tracker()
         if tracker is not None:
             tracker.calls += 1

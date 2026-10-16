@@ -142,7 +142,7 @@ class HarnessRuntime:
     async def async_request_scope(self, tenant_id, user_id, domain_id=None, session_id='', project_id=''):
         from infra.async_io import run_blocking
         from governance.service import get_governance
-        from governance.context import business_context
+        from governance.context import business_context, resolved_request
         def load():
             context=get_governance().context(tenant_id,user_id,domain_id,project_id,session_id)
             with business_context(context):
@@ -153,7 +153,7 @@ class HarnessRuntime:
         skill = self._candidate_skill(candidate or {})
         # The ContextVar overlay belongs to the request coroutine, not to the
         # SQL worker thread. Never enter the overlay inside run_blocking.
-        with business_context(context), self.skills_manager.candidate_overlay([skill] if skill else []):
+        with business_context(context), resolved_request(context, session_id, domain_id, project_id), self.skills_manager.candidate_overlay([skill] if skill else []):
             yield release
 
     def observe(

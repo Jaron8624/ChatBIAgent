@@ -21,6 +21,8 @@ import os
 import json
 import sqlite3
 import logging
+import time
+import math
 from contextlib import closing
 from pathlib import Path
 from typing import Dict, Any
@@ -127,6 +129,11 @@ def execute_sql(sql: str) -> str:
 
     try:
         with closing(_get_conn()) as conn:
+            timeout = float(os.getenv("SQL_EXECUTION_TIMEOUT_SECONDS", "30"))
+            if not math.isfinite(timeout) or not 0 < timeout <= 300:
+                raise ValueError("invalid_sql_execution_timeout")
+            deadline = time.monotonic() + timeout
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
             cursor = conn.cursor()
             cursor.execute(sql)
             rows = cursor.fetchall()

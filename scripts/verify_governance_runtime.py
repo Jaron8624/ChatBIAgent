@@ -185,7 +185,8 @@ async def main():
             url, connect_args={"options": "-csearch_path=" + schema}, pool_pre_ping=True
         )
         metadata.create_all(engine)
-        governance_metadata.create_all(engine)
+        from governance.schema import migrate
+        migrate(engine)
         store = HarnessStore.__new__(HarnessStore)
         store.engine = engine
         store.database_url = url
@@ -196,6 +197,12 @@ async def main():
         service.grant("proof", 9001, "commerce", 9003, "reviewer")
         owner = service.context("proof", 9001, "commerce", session_id="source")
         media = service.context("proof", 9001, "media")
+        check("omitted_domain_knowledge_base_resolves", policy.knowledge_base(owner) == 'commerce')
+        check("explicit_domain_foreign_knowledge_base_denied",
+              denied(lambda: policy.knowledge_base(owner, 'media')))
+        from sqlalchemy import inspect
+        check("existing_table_governance_indexes_present",
+              'ix_governance_records_scope_kind' in {i['name'] for i in inspect(engine).get_indexes('governance_records')})
         check(
             "cross_tenant_domain_denied",
             denied(lambda: service.context("other", 9001, "commerce")),
@@ -455,6 +462,13 @@ async def main():
             "rule_has_source_and_contributor",
             service.contributions(owner)[0]["source_traces"] == [source],
         )
+        check("batched_release_lookup_matches_single_gate", all(
+            state['gate']['decision_id'] == store.get_latest_gate(cid)['decision_id']
+            for cid, state in store.get_release_states(
+                row['harness_candidate_id'] for row in service.active_rules(owner)).items()))
+        check("daily_shared_rule_metric_has_explicit_snapshot_semantics",
+              report['payload']['active_rule_count'] >= 1 and
+              'snapshot' in report['payload']['knowledge_promotion_rate_note'])
         status = "passed"
     except Exception as error:
         status = "failed"

@@ -90,7 +90,7 @@ async def daily_domain_operations():
     from governance.schema import records
     from governance.service import get_governance
     from governance.operations import daily_report
-    from infra.async_io import run_blocking
+    from infra.async_io import run_maintenance
     def tick():
         service=get_governance()
         service.retire_stale()
@@ -105,7 +105,7 @@ async def daily_domain_operations():
         try:
             async with maintenance_leader('daily-domain-operations') as leader:
                 if leader:
-                    await run_blocking(tick)
+                    await run_maintenance(tick)
         except Exception:
             logger.exception('业务域 T+1 运营分析失败，将在下一周期重试')
         await asyncio.sleep(3600)
@@ -119,6 +119,8 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 20 + "应用启动，开始初始化连接..." + "=" * 20)
     
     # 初始化标志
+    from infra.tracing import get_provider, shutdown_tracing
+    get_provider()  # Validate exporter configuration before serving requests.
     milvus_initialized = False
     postgresql_initialized = False
     async def cleanup():
@@ -135,6 +137,7 @@ async def lifespan(app: FastAPI):
         for error in results:
             if isinstance(error, BaseException):
                 logger.error("资源清理失败，其他资源已继续清理: %s", type(error).__name__)
+        await asyncio.to_thread(shutdown_tracing)
     
     try:    
         try:
@@ -293,6 +296,9 @@ async def _no_cache(request, call_next):
         response.headers["Expires"] = "0"
     return response
 
+
+from infra.request_telemetry import RequestTelemetryMiddleware
+app.add_middleware(RequestTelemetryMiddleware)
 
 if __name__ == "__main__":
     uvicorn.run(

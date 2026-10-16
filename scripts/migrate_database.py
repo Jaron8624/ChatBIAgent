@@ -36,7 +36,7 @@ async def main():
             checkpoint_status = "passed"
         else:
             checkpoint_status = "skipped_missing_key"
-        print(f"migration_version=4 database_and_harness=passed checkpoint_schema={checkpoint_status} additive_only=true")
+        print(f"migration_version=5 database_and_harness=passed checkpoint_schema={checkpoint_status} additive_only=true")
         if os.getenv("DEMO_DATA_ENABLED", "false").lower() == "true":
             from prepare_test_data import main as prepare_demo
             await asyncio.to_thread(prepare_demo)

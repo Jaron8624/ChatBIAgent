@@ -122,6 +122,11 @@ class MemoryRedis:
 
 class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Discovery may already have imported the real PostgreSQL module. Scope
+        # the fake to this test, rather than relying on import order/setdefault.
+        postgres = patch.dict(sys.modules, {"infra.postgresql_client": pg_module})
+        postgres.start()
+        self.addCleanup(postgres.stop)
         cache_mode = patch.dict(os.environ, {"SESSION_PERSISTENCE_REQUIRED": "false"})
         cache_mode.start()
         self.addCleanup(cache_mode.stop)

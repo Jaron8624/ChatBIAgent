@@ -1,0 +1,49 @@
+# Starting thresholds are examples, not measured production SLOs. Tune from baselines.
+groups:
+  - name: nexusmind-runtime
+    rules:
+      - alert: NexusMindUnavailable
+        expr: 'up{job="nexusmind"} == 0'
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Agent metrics endpoint unavailable'
+          dashboard_url: 'http://127.0.0.1:3000/d/nexusmind-runtime'
+          trace_search_url: 'http://127.0.0.1:3000/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22query%22%3A%22%7B%20resource.service.name%20%3D%20%5C%22nexusmind-agent%5C%22%20%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D'
+      - alert: NexusMindRequestErrors
+        expr: 'sum(rate(nexusmind_requests_total{outcome="error"}[5m])) / clamp_min(sum(rate(nexusmind_requests_total[5m])), 0.001) > 0.05 and sum(increase(nexusmind_requests_total[5m])) >= 20'
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Agent request error ratio exceeds 5%'
+          dashboard_url: 'http://127.0.0.1:3000/d/nexusmind-runtime'
+          trace_search_url: 'http://127.0.0.1:3000/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22query%22%3A%22%7B%20resource.service.name%20%3D%20%5C%22nexusmind-agent%5C%22%20%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D'
+      - alert: NexusMindAnswerTTFT
+        expr: 'histogram_quantile(0.95, sum by (le) (rate(nexusmind_answer_ttft_seconds_bucket[5m]))) > 5 and sum(increase(nexusmind_answer_ttft_seconds_count[5m])) >= 20'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'P95 first answer exceeds 5 seconds'
+          dashboard_url: 'http://127.0.0.1:3000/d/nexusmind-runtime'
+          trace_search_url: 'http://127.0.0.1:3000/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22query%22%3A%22%7B%20resource.service.name%20%3D%20%5C%22nexusmind-agent%5C%22%20%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D'
+      - alert: NexusMindToolLatency
+        expr: 'histogram_quantile(0.95, sum by (le) (rate(nexusmind_stage_duration_seconds_bucket{stage="tool"}[5m]))) > 10 and sum(increase(nexusmind_stage_duration_seconds_count{stage="tool"}[5m])) >= 20'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'P95 tool execution exceeds 10 seconds'
+          dashboard_url: 'http://127.0.0.1:3000/d/nexusmind-runtime'
+          trace_search_url: 'http://127.0.0.1:3000/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22query%22%3A%22%7B%20resource.service.name%20%3D%20%5C%22nexusmind-agent%5C%22%20%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D'
+      - alert: NexusMindTraceExportFailures
+        expr: 'increase(nexusmind_trace_export_failures_total[5m]) > 0'
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Trace batches cannot reach the collector'
+          dashboard_url: 'http://127.0.0.1:3000/d/nexusmind-runtime'
+          trace_search_url: 'http://127.0.0.1:3000/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22query%22%3A%22%7B%20resource.service.name%20%3D%20%5C%22nexusmind-agent%5C%22%20%7D%22%2C%22queryType%22%3A%22traceql%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D'

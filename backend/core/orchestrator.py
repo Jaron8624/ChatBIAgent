@@ -34,7 +34,7 @@ from evaluation.monitor import Monitor
 from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
 from core import collaboration
 from core.task_routing import describe_task, requires_loop
-from infra.tracing import Tracer, export_otel_trace
+from infra.tracing import current_trace, traced_operation, traced_await
 from governance.context import current as current_business_context
 from governance.policy import prompt as current_policy_prompt
 
@@ -571,20 +571,20 @@ class Orchestrator:
         workflow = StateGraph(AgentState)
 
         # 添加节点
-        workflow.add_node("supervisor", self._supervisor_node)
-        workflow.add_node("plan", self._plan_node)
-        workflow.add_node("explore", self._explore_node)
-        workflow.add_node("rag_agent", self._rag_node)
-        workflow.add_node("memory_agent", self._memory_node)
-        workflow.add_node("mcp_tools", self._mcp_node)
-        workflow.add_node("react_loop", self._react_node)
-        workflow.add_node("coordinate", self._coordinate_node)
-        workflow.add_node("root_cause", self._root_cause_node)
-        workflow.add_node("reflection", self._reflection_node)
-        workflow.add_node("synthesize", self._synthesize_node)
-        workflow.add_node("direct", self._direct_node)
-        workflow.add_node("retrieve_all", self._retrieve_all_node)
-        workflow.add_node("nl_compile", self._nl_compile_node)
+        workflow.add_node("supervisor", traced_operation("agent.supervisor", stage="supervisor")(self._supervisor_node))
+        workflow.add_node("plan", traced_operation("agent.plan", stage="plan")(self._plan_node))
+        workflow.add_node("explore", traced_operation("agent.explore", stage="explore")(self._explore_node))
+        workflow.add_node("rag_agent", traced_operation("agent.rag_agent", stage="rag_agent")(self._rag_node))
+        workflow.add_node("memory_agent", traced_operation("agent.memory_agent", stage="memory_agent")(self._memory_node))
+        workflow.add_node("mcp_tools", traced_operation("agent.mcp_tools", stage="mcp_tools")(self._mcp_node))
+        workflow.add_node("react_loop", traced_operation("agent.react_loop", stage="react_loop")(self._react_node))
+        workflow.add_node("coordinate", traced_operation("agent.coordinate", stage="coordinate")(self._coordinate_node))
+        workflow.add_node("root_cause", traced_operation("agent.root_cause", stage="root_cause")(self._root_cause_node))
+        workflow.add_node("reflection", traced_operation("agent.reflection", stage="reflection")(self._reflection_node))
+        workflow.add_node("synthesize", traced_operation("agent.synthesize", stage="synthesize")(self._synthesize_node))
+        workflow.add_node("direct", traced_operation("agent.direct", stage="direct")(self._direct_node))
+        workflow.add_node("retrieve_all", traced_operation("agent.retrieve_all", stage="retrieve_all")(self._retrieve_all_node))
+        workflow.add_node("nl_compile", traced_operation("agent.nl_compile", stage="nl_compile")(self._nl_compile_node))
 
         # 入口
         workflow.set_entry_point("supervisor")
@@ -772,6 +772,7 @@ class Orchestrator:
             response["recoverable"] = False
         return response
 
+    @traced_operation("session.recover", layer="L1", stage="resume", request=True)
     async def recover_session(self, session_id: str, user_id: int, tenant_id: str):
         from governance.service import get_governance
         from governance.context import business_context
@@ -829,9 +830,8 @@ class Orchestrator:
                 checkpoint = await graph.aget_state(config)
                 business=current_business_context()
                 values=checkpoint.values or {}
-                if business and (values.get('policy_hash') and values['policy_hash']!=business.policy_hash
-                        or business.domain!='default' and values.get('business_domain')!=business.domain):
-                    raise PermissionError('business_policy_changed_restart_required')
+                from governance.policy import validate_checkpoint
+                validate_checkpoint(values, business)
                 if business and values.get('governed_rules_ids'):
                     from governance.service import get_governance
                     valid=await asyncio.to_thread(get_governance().active_rules,business)
@@ -1298,6 +1298,7 @@ class Orchestrator:
         await self._emit(sid, "node_start", {"node": "retrieve_all"})
         start = time.time()
 
+        @traced_operation("retrieval.rag", stage="rag_agent")
         async def run_rag() -> Dict[str, Any]:
             try:
                 return await self.rag_agent.process(state)
@@ -1305,6 +1306,7 @@ class Orchestrator:
                 logger.warning(f"RAG 并行检索失败: {e}")
                 return {"rag_result": "", "error_info": str(e)}
 
+        @traced_operation("retrieval.memory", stage="memory_agent")
         async def run_memory() -> Dict[str, Any]:
             try:
                 return await self.memory_agent.process(state)
@@ -1312,6 +1314,7 @@ class Orchestrator:
                 logger.warning(f"Memory 并行检索失败: {e}")
                 return {"memory_result": "", "error_info": str(e)}
 
+        @traced_operation("retrieval.tools", stage="mcp_tools")
         async def run_mcp() -> Dict[str, Any]:
             try:
                 await self._load_external_mcp_pool()
@@ -1747,23 +1750,25 @@ class Orchestrator:
         else:
             return "fail"
 
+    @traced_operation("agent.request", stage="orchestrator", request=True)
     async def process(
-        self, query, user_id, session_id, knowledge_base_id="默认知识库", messages=None,
+        self, query, user_id, session_id, knowledge_base_id=None, messages=None,
         on_event=None, tenant_id="", memory_sources=None, domain_id=None, project_id="",
     ):
         from governance.service import get_governance
-        from governance.context import business_context
+        from governance.context import business_context, matching_request
+        from governance.policy import knowledge_base
         from infra.async_io import run_blocking
         governance = await run_blocking(get_governance)
-        ctx = await run_blocking(governance.context, tenant_id or 'default', user_id,
-                                 domain_id, project_id, session_id)
-        allowed_kbs = ctx.policy.get('allowed_knowledge_bases')
-        if allowed_kbs is not None and knowledge_base_id not in allowed_kbs:
-            raise PermissionError('knowledge_base_outside_business_domain')
+        ctx = matching_request(tenant_id or 'default', user_id, domain_id, project_id, session_id)
+        if ctx is None:
+            ctx = await run_blocking(governance.context, tenant_id or 'default', user_id,
+                                     domain_id, project_id, session_id)
+        knowledge_base_id = knowledge_base(ctx, knowledge_base_id)
         with business_context(ctx):
             rules = await run_blocking(governance.active_rules, ctx)
-            from memory.managed_store import terms
-            selected = [r for r in rules if terms(query) & terms(r['trigger_pattern'])][:3]
+            from governance.retrieval import select_rules
+            selected = select_rules(query, rules)
             ctx.signals.append({'kind':'selected_rules','rules':selected})
             result = await self._process_scoped(query, user_id, session_id, knowledge_base_id,
                 messages, on_event, tenant_id, memory_sources)
@@ -1776,6 +1781,7 @@ class Orchestrator:
                 logger.exception('业务域运营事件保存失败')
             return result
 
+    @traced_operation("agent.execute", stage="orchestrator", request=True)
     async def _process_scoped(
         self,
         query: str,
@@ -1795,8 +1801,8 @@ class Orchestrator:
         if on_event:
             self._session_callbacks[session_id] = on_event
 
-        tracer = Tracer()
-        root_span = tracer.start_trace("orchestrator")
+        tracer = current_trace()
+        root_span = tracer.root
 
         # Security protected cases are decided before query rewrite, retrieval
         # and tool routing.  This prevents a safety test from passing only
@@ -1811,7 +1817,6 @@ class Orchestrator:
             )
             root_span.tag("security.category", safety_policy["category"])
             root_span.tag("security.decision", "handoff")
-            root_span.finish()
             result = {
                 "final_response": response,
                 "response": response,
@@ -1845,7 +1850,8 @@ class Orchestrator:
 
         # 会话恢复
         session_mgr = await get_session_manager()
-        resumed_sid, snapshot = await session_mgr.resume_or_create(session_id, user_id, tenant_id)
+        resumed_sid, snapshot = await traced_await("session.restore",
+            session_mgr.resume_or_create(session_id, user_id, tenant_id), layer="L1", stage="session")
         if snapshot:
             saved_run_state = snapshot.state or {}
             if saved_run_state.get("run_status") in {"running", "interrupted"}:
@@ -1898,16 +1904,15 @@ class Orchestrator:
                 if user_id <= 0:
                     messages = session_mgr._fit_session_budget(messages)
                 else:
-                    messages = await session_mgr.compress_if_needed(
-                        resumed_sid, messages, llm_client=compress_llm
-                    )
+                    messages = await traced_await("context.compress", session_mgr.compress_if_needed(
+                        resumed_sid, messages, llm_client=compress_llm), stage="context")
 
         # ===== 跨 Session 记忆连续性：注入用户长期记忆 =====
         if user_id > 0:
             try:
                 from memory.context_loader import load_request_memory_context
-                mem_result = await load_request_memory_context(query, user_id, tenant_id, resumed_sid,
-                    token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600")))
+                mem_result = await traced_await("memory.load", load_request_memory_context(query, user_id, tenant_id, resumed_sid,
+                    token_budget=int(os.getenv("MEMORY_CONTEXT_TOKEN_BUDGET", "600"))), stage="memory")
                 if mem_result:
                     # 把记忆作为 system context 注入到 messages 开头
                     memory_msg = {
@@ -1924,11 +1929,8 @@ class Orchestrator:
 
         # 查询改写
         rewriter = QueryRewriter()
-        rewritten = await rewriter.rewrite(
-            query,
-            messages or [],
-            cache_scope=f"{tenant_id}:{user_id}:{resumed_sid}",
-        )
+        rewritten = await traced_await("query.rewrite", rewriter.rewrite(
+            query, messages or [], cache_scope=f"{tenant_id}:{user_id}:{resumed_sid}"), stage="rewrite")
 
         # 构建初始状态
         initial_state: AgentState = {
@@ -2006,6 +2008,7 @@ class Orchestrator:
             pending_messages.append({"role": "user", "content": query})
         run_state_saved = False
 
+        @traced_operation("session.save_running", layer="L1", stage="session")
         async def save_running_state():
             nonlocal run_state_saved
             if user_id <= 0:
@@ -2030,6 +2033,7 @@ class Orchestrator:
                 raise PermissionError("该会话已删除，不能继续写入")
             run_state_saved = True
 
+        @traced_operation("session.save_completed", layer="L1", stage="session")
         async def persist_completed_state(result):
             result["session_id"] = resumed_sid
             if user_id > 0:
@@ -2047,6 +2051,7 @@ class Orchestrator:
                         ("tool_events", "react_result", "mcp_results", "compiled_sql")},
                 )
 
+        @traced_operation("session.save_interrupted", layer="L1", stage="session")
         async def save_interrupted_state():
             if user_id <= 0 or not run_state_saved:
                 return
@@ -2070,10 +2075,13 @@ class Orchestrator:
 
         async def invoke_graph():
             from core.context_store import context_identity
+            from infra.llm_usage import attach_current_usage
             with context_identity(user_id, tenant_id, resumed_sid):
                 if graph_config is None:
-                    return await graph.ainvoke(initial_state)
-                return await graph.ainvoke(initial_state, graph_config, durability="sync")
+                    result = await graph.ainvoke(initial_state)
+                else:
+                    result = await graph.ainvoke(initial_state, graph_config, durability="sync")
+                return attach_current_usage(result)
 
         # 执行。检查点启用时，同一会话的执行、恢复和删除由 PostgreSQL
         # advisory lock 串行化，避免并发请求覆盖彼此的图状态。
@@ -2108,20 +2116,17 @@ class Orchestrator:
                     await graph_manager.delete_thread(graph_thread_id)
                 except Exception:
                     logger.exception("匿名图检查点清理失败")
-        total_latency = (time.time() - start) * 1000
+        execution_latency = (time.time() - start) * 1000
+        total_latency = root_span.to_dict()["duration"]
+        result["execution_latency_ms"] = execution_latency
 
         result["latency_ms"] = total_latency
         result["model_used"] = initial_state["model_used"]
         result["session_id"] = resumed_sid
 
-        root_span.finish()
         result["trace_id"] = root_span.trace_id
         result["spans"] = tracer.get_trace(root_span.trace_id)
         result["otel_trace"] = tracer.to_otel(root_span.trace_id)
-        otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
-        if otel_endpoint:
-            # Export is best effort and never holds up the user response.
-            asyncio.create_task(asyncio.to_thread(export_otel_trace, result["otel_trace"], otel_endpoint))
 
         # 发送 done 事件（流式场景，graph 节点使用 resumed_sid；先发再清理）
         await self._emit(resumed_sid, "done", {"latency_ms": round(total_latency, 1), "trace_id": root_span.trace_id})
