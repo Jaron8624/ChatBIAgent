@@ -14,7 +14,6 @@ from infra.llm_provider import create_chat_model
 from infra.scheduler import maintenance_leader
 from typing import Set
 from memory.auto_store_memory_from_psql import run_compression_task
-from infra.redis_cache import get_redis_client, close_redis_client, close_redis_binary_client
 from evaluation.evolution_loop import get_evolution_loop
 from infra.graph_checkpointer import (
     close_graph_checkpointer,
@@ -128,7 +127,7 @@ async def lifespan(app: FastAPI):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        closers = [close_redis_client(), close_redis_binary_client(), close_graph_checkpointer()]
+        closers = [close_graph_checkpointer()]
         if milvus_initialized:
             closers.append(app.state.milvus_client.close())
         if postgresql_initialized:
@@ -158,18 +157,6 @@ async def lifespan(app: FastAPI):
             logger.error(f"Milvus 客户端初始化失败: {e}")
             raise
 
-        # ===== 新增：预热 Redis 连接 =====
-        try:
-            app.state.redis_client = await get_redis_client()
-            await app.state.redis_client.ping()
-            logger.info("【Redis】 客户端初始化完成")
-        except Exception as e:
-            logger.error(f"Redis 客户端初始化失败: {e}")
-            if os.getenv("REDIS_REQUIRED", "false").lower() == "true":
-                raise
-            app.state.redis_client = None
-            logger.warning("Redis 缓存不可用，会话继续使用持久化状态")
-
         checkpoint_setting = os.getenv("GRAPH_CHECKPOINT_ENABLED", "auto").strip().lower()
         checkpoint_key_present = bool(os.getenv("GRAPH_CHECKPOINT_FERNET_KEY", "").strip())
         checkpoint_enabled = checkpoint_setting in {"1", "true", "yes", "on"} or (
@@ -181,8 +168,7 @@ async def lifespan(app: FastAPI):
         if session_persistence_required() and not checkpoint_enabled:
             raise RuntimeError(
                 "会话持久化是必需的。请启用 GRAPH_CHECKPOINT_ENABLED 并配置 "
-                "GRAPH_CHECKPOINT_FERNET_KEY；仅临时开发可显式设置 "
-                "SESSION_PERSISTENCE_REQUIRED=false 使用 cache_only 模式。"
+                "GRAPH_CHECKPOINT_FERNET_KEY。认证会话不支持临时缓存降级。"
             )
         if checkpoint_enabled:
             await initialize_graph_checkpointer()
@@ -262,8 +248,6 @@ async def ready():
             milvus = app.state.milvus_client
             if not await milvus.client.has_collection(milvus.knowledge_base_collection):
                 raise RuntimeError("knowledge_collection_missing")
-            if os.getenv("REDIS_REQUIRED", "false").lower() == "true":
-                await app.state.redis_client.ping()
         return {"status": "ready"}
     except Exception:
         return JSONResponse({"status": "not_ready"}, status_code=503)

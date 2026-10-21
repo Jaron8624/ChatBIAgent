@@ -346,15 +346,6 @@ async def _deliver_batch(batch, payload, ledger, pg):
     except Exception as error:
         await ledger.failed(batch, error)
         raise
-    if payload["profile"]:
-        # The DB is authoritative. Cache invalidation failure does not undo a
-        # committed vector/source batch or re-run the old profile merge.
-        try:
-            from infra.redis_cache import get_redis_client
-            redis = await get_redis_client()
-            await redis.delete(f"user_profile:{uid}")
-        except Exception:
-            logger.warning("画像缓存失效失败，数据库已提交", exc_info=True)
     return {
         "success": True, "batch_id": batch, "summary_id": payload["summary_id"],
         "token_count": payload["token_count"], "message_count": payload["message_count"],

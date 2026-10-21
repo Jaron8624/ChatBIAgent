@@ -3,7 +3,7 @@
 #
 # 说明：
 # - milvus/etcd/minio：完整版向量数据库（生产级）
-# - postgres / redis：业务数据库与会话缓存
+# - postgres：业务数据库、会话与图执行持久化
 # - backend：FastAPI 服务（自动等待依赖就绪后启动）
 # - CLI 在宿主机运行：python cli.py chat（默认连 localhost:8000）
 
@@ -94,21 +94,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ========== Redis ==========
-  redis:
-    container_name: nexusmind-redis
-    image: redis:7-alpine
-    volumes:
-      - ./docker-data/redis:/data
-    ports:
-      - "127.0.0.1:6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   # ========== FastAPI 后端 ==========
   backend:
     container_name: nexusmind-backend
@@ -125,7 +110,6 @@ services:
       Token: root:Milvus
       DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
       HARNESS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
-      REDIS_URL: redis://redis:6379/0
       UPLOAD_WORKER_MODE: external
       MAINTENANCE_ENABLED: "false"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
@@ -166,7 +150,6 @@ services:
       Token: root:Milvus
       DATABASE_URL: postgresql://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
       HARNESS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusmind}:${POSTGRES_PASSWORD:-nexusmind123}@postgres:5432/echomind_db
-      REDIS_URL: redis://redis:6379/0
       MAINTENANCE_ENABLED: "true"
       UPLOAD_STORAGE_ROOT: /app/data/uploads
       CONTEXT_STORE_DIR: /app/runtime/context_store

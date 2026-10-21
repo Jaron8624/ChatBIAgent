@@ -75,7 +75,7 @@ def manifest():
         'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
         'source_hashes': {f: hashlib.sha256((ROOT/f).read_bytes()).hexdigest() for f in files},
         'dependencies': {p: importlib.metadata.version(p) for p in
-                         ['pymilvus', 'asyncpg', 'langchain-core', 'langchain-openai', 'openai', 'redis']},
+                         ['pymilvus', 'asyncpg', 'langchain-core', 'langchain-openai', 'openai']},
         'model': os.getenv('AGENT_BASE_MODEL'), 'embedding_model': os.getenv('EMBEDDING_MODEL'),
         'temperature': 0, 'minimum_relevance': float(os.getenv('MEMORY_MIN_RELEVANCE', '.35')),
         'evidence': 'synthetic conversations; real model and embedding APIs; real local databases',

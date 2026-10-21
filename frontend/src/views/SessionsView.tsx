@@ -86,7 +86,7 @@ export default function SessionsView({
     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 16, alignItems: 'start' }}>
       <Card
         title="会话列表"
-        hint="Redis zlib 压缩存储 · 多会话索引"
+        hint="PostgreSQL 持久化 · 身份隔离 · 会话恢复"
         actions={
           <button className="btn small" onClick={load}>
             刷新

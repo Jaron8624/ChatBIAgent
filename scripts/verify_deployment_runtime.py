@@ -55,7 +55,7 @@ def main():
         env.update({"DATABASE_URL": f"postgresql://{user}:{password}@postgres:5432/{db}",
             "HARNESS_DATABASE_URL": f"postgresql+psycopg://{user}:{password}@postgres:5432/{db}",
             "Milvus_url": "http://milvus:19530", "Token": "root:Milvus",
-            "REDIS_URL": "redis://redis:6379/15", "NEXUSMIND_ENV": "production",
+            "NEXUSMIND_ENV": "production",
             "NEXUSMIND_SCHEMA_BOOTSTRAP": "false", "GRAPH_CHECKPOINT_ENABLED": "true",
             "SESSION_PERSISTENCE_REQUIRED": "true", "MAINTENANCE_ENABLED": "false",
             "EVOLUTION_LOOP_ENABLED": "false", "UPLOAD_WORKER_MODE": "external",

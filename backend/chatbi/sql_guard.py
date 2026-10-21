@@ -237,12 +237,13 @@ class SQLGuardPipeline:
         self.max_repair_rounds = max_repair_rounds
 
     async def run(self, sql: str, query: str = "") -> ValidationResult:
+        from infra.async_io import run_tool
         result = ValidationResult(ok=False, sql=sql)
         current_sql = sql.strip().rstrip(";")
 
         for round_no in range(self.max_repair_rounds + 1):
             # 1. 静态校验
-            errors = self.validator.validate(current_sql)
+            errors = await run_tool(self.validator.validate, current_sql)
             if errors:
                 result.repair_history.append(f"[round {round_no}] 静态校验失败: {'; '.join(errors)}")
                 if round_no < self.max_repair_rounds:
@@ -254,7 +255,7 @@ class SQLGuardPipeline:
                 return result
 
             # 2. 执行
-            raw = execute_sql(current_sql)
+            raw = await run_tool(execute_sql, current_sql)
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:

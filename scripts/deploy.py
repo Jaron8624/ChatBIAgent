@@ -182,7 +182,7 @@ def main():
         if not args.no_build:
             run(compose + ["build", "backend", "frontend"])
         run(compose + ["up", "-d", "--wait", "--wait-timeout", str(args.timeout),
-            "postgres", "redis", "etcd", "minio", "milvus"])
+            "postgres", "etcd", "minio", "milvus"])
         # Always execute migration, including upgrade of an existing deployment.
         run(compose + ["run", "--rm", "--no-deps", "migrate"])
         run(compose + ["up", "-d", "--no-deps", "--wait", "--wait-timeout", str(args.timeout),

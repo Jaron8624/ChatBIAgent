@@ -31,8 +31,8 @@ async def lifespan_probe(check, suffix):
     env = {"knowledge_base_collection": names[0], "memory_collection": names[1],
         "UPLOAD_WORKER_MODE": "external", "MAINTENANCE_ENABLED": "false",
         "EVOLUTION_LOOP_ENABLED": "false", "NEXUSMIND_ENV": "production",
-        "NEXUSMIND_SCHEMA_BOOTSTRAP": "false", "REDIS_REQUIRED": "false",
-        "REDIS_URL": "redis://127.0.0.1:1/0", "GRAPH_CHECKPOINT_FERNET_KEY": Fernet.generate_key().decode(),
+        "NEXUSMIND_SCHEMA_BOOTSTRAP": "false",
+        "GRAPH_CHECKPOINT_FERNET_KEY": Fernet.generate_key().decode(),
         "GRAPH_CHECKPOINT_PREVIOUS_KEYS": "", "NEXUSMIND_ALLOW_HEADER_IDENTITY": "false",
         "PGOPTIONS": "-c search_path=" + graph_schema}
     client = AsyncMilvusClient(uri=os.environ["Milvus_url"], token=os.getenv("Token"))
@@ -47,7 +47,7 @@ async def lifespan_probe(check, suffix):
             import main as application
             async with application.app.router.lifespan_context(application.app):
                 check("production_startup_uses_migrated_schema", application.app.state.postgresql_client.pool is not None)
-                check("redis_connection_failure_does_not_block_startup", application.app.state.redis_client is None)
+                check("startup_has_no_cache_client", not hasattr(application.app.state, 'redis_client'))
                 check("api_does_not_spawn_external_worker_or_maintenance", not application.background_tasks)
                 from infra.scheduler import maintenance_leader
                 async with maintenance_leader("fixture-" + suffix) as first:

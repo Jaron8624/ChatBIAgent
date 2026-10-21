@@ -20,6 +20,7 @@ import time
 import asyncio
 import logging
 import uuid
+import re
 from typing import Dict, List, Any, Optional, TypedDict, Annotated
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI  # noqa: F401 保留导入，便于回退 LLM_PROVIDER
@@ -34,6 +35,7 @@ from evaluation.monitor import Monitor
 from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
 from core import collaboration
 from core.task_routing import describe_task, requires_loop
+from core.execution_policy import enabled, scalar_count_request, verified_count_answer, review_before_publish
 from infra.tracing import current_trace, traced_operation, traced_await
 from governance.context import current as current_business_context
 from governance.policy import prompt as current_policy_prompt
@@ -80,6 +82,9 @@ class AgentState(TypedDict):
     latency_ms: float
     tokens_consumed: int
     retry_count: int
+    compiled_plan: Optional[Dict[str, Any]]
+    verified_answer: Optional[str]
+    answer_buffered: bool
 
 
 # ==================== LangChain 工具调用辅助 ====================
@@ -332,7 +337,7 @@ class ReflectionAgent:
                 content = content[:-3]
 
             parsed = json.loads(content.strip())
-            passed = parsed.get("passed", True)
+            passed = parsed.get("passed") is True
             feedback = parsed.get("feedback", "")
             return {
                 "reflection_passed": passed,
@@ -340,7 +345,7 @@ class ReflectionAgent:
             }
         except Exception as e:
             logger.error(f"Reflection Agent 失败: {e}")
-            return {"reflection_passed": True, "reflection_feedback": ""}
+            return {"reflection_passed": False, "reflection_feedback": "审核服务不可用，不能视为审核通过"}
 
 
 class DirectAgent:
@@ -615,8 +620,10 @@ class Orchestrator:
         workflow.add_edge("coordinate", "synthesize")
         # 根因分析规划链完成后，直接将报告交给汇总/质量审核
         workflow.add_edge("root_cause", "synthesize")
-        # Plan → 按步骤执行（简化：plan 后直接走 synthesize，实际可循环）
-        workflow.add_edge("plan", "synthesize")
+        # A plan is not evidence of execution. Explicit plan-only questions stay
+        # descriptive; executable complex requests continue through durable ReAct.
+        workflow.add_conditional_edges("plan", self._plan_decision,
+                                       {"execute": "react_loop", "describe": "synthesize"})
         # Explore → Synthesize
         workflow.add_edge("explore", "synthesize")
         # RAG → Synthesize
@@ -880,6 +887,16 @@ class Orchestrator:
 
         await self._emit(session_id, "node_start", {"node": "supervisor"})
         start = time.time()
+        effective = state.get("rewritten_query") or query
+        if enabled('ORCHESTRATOR_FAST_COUNT') and scalar_count_request(effective):
+            from chatbi.text2sql_pipeline import SemanticCompilerRouter
+            from infra.async_io import run_blocking
+            routed = await run_blocking(SemanticCompilerRouter().compile_if_supported, effective)
+            if routed.get('compiled') and routed.get('ir',{}).get('metrics') == ['order_count']:
+                elapsed=(time.time()-start)*1000
+                await self._emit(session_id, 'intent', {'intent':'data_query','confidence':1.0,'latency_ms':elapsed,'source':'closed_count_grammar'})
+                await self._emit(session_id, 'node_complete', {'node':'supervisor','latency_ms':elapsed,'intent':'data_query'})
+                return {'intent':'data_query','intent_confidence':1.0,'compiled_plan':routed}
         intent, confidence, clarify = await self.intent_recognizer.recognize(
             query,
             session_id,
@@ -1022,7 +1039,15 @@ class Orchestrator:
 
             history = list(state.get("messages", []))
 
-            react_result = await self.react_agent.run(
+            react_result = None
+            if enabled('ORCHESTRATOR_COMPILED_WORKERS'):
+                from core.semantic_sequence import run_sequence
+                from chatbi.sql_guard import SQLGuardPipeline
+                react_result = await run_sequence(state['query'], SQLGuardPipeline(max_repair_rounds=0).run,
+                    load_progress=load_progress if execution_thread and manager.saver else None,
+                    save_progress=save_progress if execution_thread and manager.saver else None)
+            if react_result is None:
+                react_result = await self.react_agent.run(
                 query=state["query"],
                 tools=tool_defs,
                 tool_executor=executor,
@@ -1104,10 +1129,19 @@ class Orchestrator:
             query = state.get("rewritten_query", state["query"])
             user_id = state["user_id"]
             knowledge_base_id = state.get("knowledge_base_id", "默认知识库")
+            worker_events = []
 
             # ---- Worker 执行器（复用既有 Agent 的底层工具调用）----
 
             async def data_worker(q: str) -> str:
+                datasets=set(re.findall(r'\b(olist|chinook)\b',query,re.I))
+                if len(datasets)==1 and not re.search(r'\b(olist|chinook)\b',q,re.I):
+                    q=next(iter(datasets))+' '+q
+                if enabled('ORCHESTRATOR_COMPILED_WORKERS'):
+                    compiled = await self._nl_compile_node({**state, 'query':q, 'rewritten_query':q, 'compiled_plan':None})
+                    if compiled.get('compile_status') == 'semantic_compiled':
+                        worker_events.extend(compiled.get('tool_events',[]))
+                        return '\n'.join(compiled.get('mcp_results',[]))
                 results = await self.mcp_router.route_and_execute(
                     query=q,
                     conversation_history=[],
@@ -1115,6 +1149,7 @@ class Orchestrator:
                     user_id=user_id,
                     tenant_id=state.get("tenant_id", "default"),
                 )
+                worker_events.extend(self.mcp_router.last_tool_events)
                 return "\n".join(results) if results else "[未查到数据]"
 
             async def schema_worker(q: str) -> str:
@@ -1151,7 +1186,11 @@ class Orchestrator:
                 )
 
             # ---- Coordinator 拆解 + 并行执行 ----
-            subtasks = await collaboration.coordinate(query)
+            task = describe_task(query)
+            if enabled('ORCHESTRATOR_COMPILED_WORKERS') and len(task.steps)>1 and task.dependency=='independent' and task.sources==('data',):
+                subtasks=[{'worker':'data_worker','query':q} for q in task.steps]
+            else:
+                subtasks = await collaboration.coordinate(query)
             logger.info(
                 f"Coordinator 拆解出 {len(subtasks)} 个子任务: "
                 + ", ".join(f"{s['worker']}({s['query'][:20]})" for s in subtasks)
@@ -1173,9 +1212,8 @@ class Orchestrator:
             for o in outcomes:
                 tag = f"[{o['worker']} | {o['query']}]"
                 if o["worker"] == "data_worker":
-                    for line in o["result"].split("\n"):
-                        if _re.match(r"^[a-z_][a-z0-9_]*:", line):
-                            mcp_lines.append(line)
+                    # Preserve multiline JSON and bind evidence to its subtask.
+                    mcp_lines.append(f"{tag}\n{o['result']}")
                 elif o["worker"] == "schema_worker":
                     rag_parts.append(f"{tag}\n{o['result']}")
                 else:
@@ -1193,6 +1231,7 @@ class Orchestrator:
                 "mcp_results": mcp_lines,
                 "rag_result": "\n\n".join(rag_parts),
                 "memory_result": "\n\n".join(mem_parts),
+                "tool_events": worker_events,
             }
         except Exception as e:
             latency = (time.time() - start) * 1000
@@ -1272,7 +1311,9 @@ class Orchestrator:
         try:
             from chatbi.text2sql_pipeline import SemanticCompilerRouter
             from chatbi.sql_guard import SQLGuardPipeline
-            routed = SemanticCompilerRouter().compile_if_supported(state.get("rewritten_query", state["query"]))
+            from infra.async_io import run_blocking
+            routed = state.get('compiled_plan') or await run_blocking(
+                SemanticCompilerRouter().compile_if_supported, state.get("rewritten_query", state["query"]))
             ir = routed["ir"]
             if routed.get("compiled"):
                 guarded = await SQLGuardPipeline(max_repair_rounds=3).run(routed["sql"], state["query"])
@@ -1280,7 +1321,8 @@ class Orchestrator:
                     latency = (time.time() - start) * 1000
                     self.monitor.record("nl_compile", latency, True, tokens=0)
                     await self._emit(sid, "node_complete", {"node": "nl_compile", "latency_ms": round(latency, 1), "route": "semantic_compiled"})
-                    return {"schema_linking": ir, "metric_plan": routed.get("metric_plan"), "compiled_sql": guarded.sql, "compile_status": "semantic_compiled", "mcp_results": [f"[语义层确定性查询]\n{guarded.to_json()}"], "tool_events": [{"tool_name": "execute_sql", "tool_type": "business", "arguments": {"sql": guarded.sql}, "status": "success", "duration_ms": 0, "result_summary": guarded.to_json(), "side_effect": "read_only"}]}
+                    answer = verified_count_answer(state.get('rewritten_query') or state['query'], routed, guarded) if enabled('ORCHESTRATOR_FAST_COUNT') else None
+                    return {"verified_answer":answer,"schema_linking": ir, "metric_plan": routed.get("metric_plan"), "compiled_sql": guarded.sql, "compile_status": "semantic_compiled", "mcp_results": [f"[语义层确定性查询]\n{guarded.to_json()}"], "tool_events": [{"tool_name": "execute_sql", "tool_type": "business", "arguments": {"sql": guarded.sql}, "status": "success", "duration_ms": latency, "result_summary": guarded.to_json(), "result":guarded.to_json(),"side_effect": "read_only"}]}
                 ir["reasons"].append("编译 SQL 未通过守卫，降级 LLM")
             latency = (time.time() - start) * 1000
             self.monitor.record("nl_compile", latency, True, tokens=0)
@@ -1347,7 +1389,24 @@ class Orchestrator:
     async def _reflection_node(self, state: AgentState) -> Dict[str, Any]:
         await self._emit(state.get("session_id", ""), "node_start", {"node": "reflection"})
         start = time.time()
-        result = await self.reflection_agent.process(state)
+        if enabled('ORCHESTRATOR_SELECTIVE_REVIEW') and state.get('verified_answer') and state.get('final_response') == state['verified_answer']:
+            result={'reflection_passed':True,'reflection_feedback':'deterministic guarded scalar; no generative claims'}
+        else:
+            result = await self.reflection_agent.process(state)
+        if state.get('answer_buffered'):
+            if result.get('reflection_passed'):
+                await self._emit(state.get('session_id',''), 'answer', {'content':state.get('final_response','')})
+                chart=re.search(r'```chart\s*\n(.*?)```',state.get('final_response',''),re.DOTALL)
+                if chart:
+                    try:
+                        await self._emit(state.get('session_id',''), 'chart', {'option':json.loads(chart.group(1))})
+                    except (ValueError,TypeError):
+                        logger.warning('Approved response contained an invalid chart')
+            else:
+                result['final_response']='当前回答未通过审核，请补充信息或转人工核验。'
+                result['requires_human']=True
+                result['handoff_summary']=result.get('reflection_feedback') or 'review_failed'
+                await self._emit(state.get('session_id',''), 'answer', {'content':result['final_response']})
         latency = (time.time() - start) * 1000
         self.monitor.record("reflection", latency, True, tokens=0)
         await self._emit(state.get("session_id", ""), "node_complete", {"node": "reflection", "latency_ms": round(latency, 1), "passed": result.get("reflection_passed", True)})
@@ -1360,6 +1419,11 @@ class Orchestrator:
         """汇总各 Agent 结果，生成最终回答（集成 Skills + Plan Mode）"""
         await self._emit(state.get("session_id", ""), "node_start", {"node": "synthesize"})
         syn_start = time.time()
+        if state.get('verified_answer'):
+            answer=state['verified_answer']
+            await self._emit(state.get('session_id',''), 'answer', {'content':answer})
+            await self._emit(state.get('session_id',''), 'node_complete', {'node':'synthesize','latency_ms':(time.time()-syn_start)*1000,'mode':'guarded_scalar'})
+            return {'final_response':answer,'answer_buffered':False}
         query = state["query"]
         rag = state.get("rag_result", "")
         memory = state.get("memory_result", "")
@@ -1408,7 +1472,7 @@ class Orchestrator:
             # 从受约束回答中提取图表
             import re as _re2
             chart_match = _re2.search(r'```chart\s*\n(.*?)```', final_response, _re2.DOTALL)
-            if chart_match:
+            if chart_match and not review_before_publish(query):
                 try:
                     import json as _json2
                     chart_option = _json2.loads(chart_match.group(1).strip())
@@ -1418,7 +1482,7 @@ class Orchestrator:
             requires_human, handoff_summary = self._check_human_escalation(
                 query, final_response, state.get("intent", ""), context or ""
             )
-            result = {"final_response": final_response}
+            result = {"final_response": final_response, "answer_buffered":review_before_publish(query)}
             if requires_human:
                 result["requires_human"] = True
                 result["handoff_summary"] = handoff_summary
@@ -1430,6 +1494,7 @@ class Orchestrator:
         if not context:
             # 没有检索结果，降级为直接回答（补充 node_complete + 转人工检查）
             direct_result = await self.direct_agent.process(state)
+            direct_result['answer_buffered'] = review_before_publish(query)
             requires_human, handoff_summary = self._check_human_escalation(
                 query, direct_result.get("final_response", ""), state.get("intent", ""), ""
             )
@@ -1493,17 +1558,14 @@ class Orchestrator:
                 token = chunk.content if hasattr(chunk, "content") else str(chunk)
                 if token:
                     final_response += token
-                    await self._emit(
-                        state.get("session_id", ""),
-                        "answer",
-                        {"content": token},
-                    )
+                    if not review_before_publish(query):
+                        await self._emit(state.get("session_id", ""), "answer", {"content": token})
 
             # ===== 图表提取 =====
             # 从 final_response 中提取 ```chart 代码块，发送 chart 事件
             import re as _re
             chart_match = _re.search(r'```chart\s*\n(.*?)```', final_response, _re.DOTALL)
-            if chart_match:
+            if chart_match and not review_before_publish(query):
                 chart_json_str = chart_match.group(1).strip()
                 try:
                     import json as _json
@@ -1516,14 +1578,16 @@ class Orchestrator:
                 except _json.JSONDecodeError:
                     logger.warning("图表 JSON 解析失败，跳过图表渲染")
 
-            result = {"final_response": final_response}
+            result = {"final_response": final_response, "answer_buffered": review_before_publish(query)}
             latency = (time.time() - syn_start) * 1000
             await self._emit(state.get("session_id", ""), "node_complete", {"node": "synthesize", "latency_ms": round(latency, 1)})
             return result
         except Exception as e:
             logger.error(f"Synthesize 失败: {e}")
             await self._emit(state.get("session_id", ""), "node_complete", {"node": "synthesize", "error": str(e)})
-            return await self.direct_agent.process(state)
+            fallback = await self.direct_agent.process(state)
+            fallback['answer_buffered'] = review_before_publish(query)
+            return fallback
 
     def _check_human_escalation(
         self, query: str, response: str, intent: str, context: str
@@ -1556,6 +1620,7 @@ class Orchestrator:
         await self._emit(state.get("session_id", ""), "node_start", {"node": "direct"})
         start = time.time()
         result = await self.direct_agent.process(state)
+        result['answer_buffered'] = review_before_publish(state.get('query',''))
         latency = (time.time() - start) * 1000
         self.monitor.record("direct", latency, True, tokens=0)
         await self._emit(state.get("session_id", ""), "node_complete", {"node": "direct", "latency_ms": round(latency, 1)})
@@ -1632,6 +1697,14 @@ class Orchestrator:
         if intent == "root_cause":
             return "root_cause"
 
+        query = state.get('rewritten_query') or state.get('query','')
+        task = describe_task(query)
+        plan_only = bool(re.search(r'只(?:要|需).*(?:计划|方案)|不要执行|仅.*(?:计划|步骤)', query))
+        if plan_only:
+            return 'plan'
+        if len(task.steps)>1 and not plan_only and intent not in {'greeting','chitchat','safety_review'}:
+            return 'react' if task.dependency=='sequential' else 'coordinate'
+
         # 数据分析意图：复合诉求先交给 Coordinator/ReAct，单一问题走确定性语义编译。
         if intent in ("data_query", "trend_analysis", "comparison", "report_request"):
             # 跨模块复合查询（数据查询 + schema 知识 + 个人历史 混合）走
@@ -1658,19 +1731,29 @@ class Orchestrator:
             logger.info(f"性能路由建议: {perf_route}")
 
         if intent in ("knowledge_rag", "complex_task"):
-            # 知识类查询也并行检索记忆和工具，可能有个性化/业务数据
+            if enabled('ORCHESTRATOR_TARGETED_RETRIEVAL') and intent=='knowledge_rag' and len(task.steps)==1:
+                return 'rag'
             return "retrieve_all"
         elif intent == "explore_research":
             return "explore"
         elif intent == "memory_query":
-            return "retrieve_all"
+            return "memory" if enabled('ORCHESTRATOR_TARGETED_RETRIEVAL') else "retrieve_all"
         elif intent == "schema_query":
             return "retrieve_all"
         elif intent == "greeting" or intent == "chitchat":
             return "direct"
         else:
-            # 默认：并行检索
             return "retrieve_all"
+
+    @staticmethod
+    def _plan_decision(state):
+        import re
+        query=state.get('query','')
+        if re.search(r'只(?:要|需).*(?:计划|方案)|不要执行|仅.*(?:计划|步骤)',query):
+            return 'describe'
+        if state.get('intent')=='complex_task' or requires_loop(query):
+            return 'execute'
+        return 'describe'
 
     @staticmethod
     def _needs_coordinator(query: str) -> bool:
@@ -1744,6 +1827,8 @@ class Orchestrator:
 
         if passed:
             return "pass"
+        elif state.get('requires_human'):
+            return 'fail'
         elif feedback and retries < max_retries:
             # 有改进建议且未达重试上限，重试
             return "retry"
@@ -1857,7 +1942,7 @@ class Orchestrator:
             if saved_run_state.get("run_status") in {"running", "interrupted"}:
                 self._session_callbacks.pop(session_id, None)
                 raise RuntimeError("该会话有未完成的 Agent 执行，请先调用会话恢复接口")
-            # Long-term memory is fetched afresh each turn, never accumulated in Redis.
+            # Long-term memory is fetched afresh each turn, never accumulated in session history.
             persisted = [
                 message for message in snapshot.messages
                 if message.get("context_kind") != "long_term_memory"
@@ -1969,6 +2054,9 @@ class Orchestrator:
             "latency_ms": 0.0,
             "tokens_consumed": 0,
             "retry_count": 0,
+            "compiled_plan": None,
+            "verified_answer": None,
+            "answer_buffered": False,
             "knowledge_base_id": knowledge_base_id,
         }
 

@@ -11,6 +11,7 @@ from rag.milvus_client import get_milvus_client
 from infra import config
 from typing import List, Dict, Set
 import os
+import re
 from urllib.parse import unquote
 from pathlib import Path
 import uuid
@@ -244,6 +245,11 @@ async def rerank_documents(query: str, documents: list, top_n=5):
 
     # 官方文档中的API地址和模型名称
     url = os.getenv("RERANK_URL")
+    # A missing URL is configuration, not a transient network failure. Do not
+    # add two seconds of retry sleeps to every otherwise successful retrieval.
+    if not url or not re.match(r'^https?://[^/\s]+', url):
+        logger.warning('Rerank endpoint unavailable; preserving retrieval order without retry')
+        return None
 
     # 请求头
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -279,6 +285,8 @@ async def rerank_documents(query: str, documents: list, top_n=5):
                 logger.error(
                     f"API 请求失败 (尝试 {attempt + 1}/{max_retries}): {response.status_code}"
                 )
+                if response.status_code < 500 and response.status_code not in (408, 429):
+                    return None
                 if attempt == max_retries - 1:
                     logger.error(f"重排序 API 最终失败，返回 None")
                     return None

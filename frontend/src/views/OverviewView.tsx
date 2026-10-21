@@ -133,7 +133,7 @@ export default function OverviewView({ onNavigate }: { onNavigate: (v: string) =
       {/* 最近会话 */}
       <Card
         title="最近会话"
-        hint="Redis 存储 · zlib 压缩 · 滑动窗口摘要"
+        hint="检查点持久化 · 历史归档 · 按预算摘要"
         actions={
           <button className="btn small" onClick={() => onNavigate('sessions')}>
             查看全部

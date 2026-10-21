@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 import os
 import asyncio
 import uuid
-from infra.redis_cache import get_redis_client 
 
 load_dotenv()
 
@@ -246,7 +245,7 @@ class PostgreSQLParentClient:
                     CREATE INDEX IF NOT EXISTS idx_summary_id ON raw_conversations(summary_id);    -- 加速查询：根据摘要ID查找所有对话
 
                     -- 会话归属登记只保存身份和生命周期，不保存聊天正文。
-                    -- Redis 快照过期后仍可核验删除请求，并阻止已删除会话被重新写入。
+                    -- 即使快照已清理，仍可核验删除请求，并阻止已删除会话被重新写入。
                     CREATE TABLE IF NOT EXISTS nexusmind_session_registry (
                         session_id VARCHAR(128) PRIMARY KEY,
                         user_id INT NOT NULL,
@@ -260,7 +259,7 @@ class PostgreSQLParentClient:
                     CREATE INDEX IF NOT EXISTS idx_nexusmind_session_owner
                         ON nexusmind_session_registry(tenant_id, user_id, updated_at DESC);
 
-                    -- 为升级前仍有原始对话的会话补登记，便于 Redis 过期后的删除校验。
+                    -- 为升级前仍有原始对话的会话补登记，便于持久化归属校验。
                     INSERT INTO nexusmind_session_registry(session_id, user_id, tenant_id)
                     SELECT DISTINCT thread_id, user_id, COALESCE(tenant_id, 'default')
                     FROM raw_conversations
@@ -998,20 +997,9 @@ class PostgreSQLParentClient:
             return False
 
     async def get_user_profile(self, user_id: int) -> Optional[str]:
-        """查询用户画像 - 使用 Redis 缓存"""
+        """Read the authoritative profile directly from PostgreSQL."""
         
         try:
-            # 1. 先从 Redis 缓存读取
-            redis_client = await get_redis_client()
-            cache_key = f"user_profile:{user_id}"
-            
-            # 用户画像缓存通过共享的异步 Redis 客户端读取。
-            cached_profile = await redis_client.get(cache_key)
-            if cached_profile:
-                logger.info(f"用户画像查询（Redis 缓存命中）user_id={user_id}")
-                return cached_profile
-            
-            # 2. 缓存未命中，查询数据库
             if not self.pool:
                 return None
             
@@ -1024,9 +1012,6 @@ class PostgreSQLParentClient:
                 if row and row["user_profile"]:
                     profile = row["user_profile"]
                     
-                    # 3. 写入 Redis 缓存（TTL 1小时）
-                    await redis_client.setex(cache_key, 3600, profile)
-                    logger.info(f"用户画像查询（数据库）user_id={user_id}, 已写入缓存")
                     return profile
                 
                 return None
@@ -1037,7 +1022,7 @@ class PostgreSQLParentClient:
 
     async def update_user_profile(self, user_id: int, user_profile: str) -> bool:
         """
-        更新用户画像，同时写入 Redis 缓存
+        更新 PostgreSQL 中的权威用户画像
 
         Args:
             user_id: 用户ID
@@ -1069,14 +1054,6 @@ class PostgreSQLParentClient:
                     user_profile.strip(),
                 )
 
-            # 2.更新 Redis 缓存
-            try:
-                redis_client = await get_redis_client()
-                cache_key = f"user_profile:{user_id}"
-                await redis_client.setex(cache_key, 3600, user_profile.strip())# 缓存 1 小时
-                logger.info(f"用户画像缓存已更新 user_id={user_id}")
-            except Exception as e:
-                logger.warning(f"更新 Redis 缓存失败: {e}")
             return True
 
         except Exception as e:

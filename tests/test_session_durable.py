@@ -52,36 +52,6 @@ class Registry:
         return True
 
 
-class Cache:
-    def __init__(self):
-        self.values = {}
-        self.index = {}
-
-    async def exists(self, key):
-        return key in self.values
-
-    async def get(self, key):
-        return self.values.get(key)
-
-    async def set(self, key, value, **kwargs):
-        self.values[key] = value
-
-    async def zadd(self, key, mapping):
-        self.index.setdefault(key, {}).update(mapping)
-
-    async def expire(self, *args):
-        return True
-
-    async def zrevrange(self, key, start, stop):
-        return list(self.index.get(key, {}))[start:stop + 1]
-
-    async def delete(self, key):
-        self.values.pop(key, None)
-
-    async def zrem(self, key, sid):
-        self.index.get(key, {}).pop(sid, None)
-
-
 class LocalManager(GraphCheckpointerManager):
     def __init__(self):
         super().__init__()
@@ -111,7 +81,6 @@ class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
         self.registry = Registry()
         self.sessions = object.__new__(SessionManager)
         self.sessions._initialized = True
-        self.sessions._redis = Cache()
         self.environment = patch.dict(os.environ, {
             "GRAPH_CHECKPOINT_FERNET_KEY": Fernet.generate_key().decode(),
             "SESSION_PERSISTENCE_REQUIRED": "true",
@@ -133,21 +102,17 @@ class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
             state=state, tenant_id="tenant",
         )
 
-    async def test_redis_miss_recovers_same_id_and_rebuilds_cache_and_list(self):
+    async def test_durable_history_and_list_need_no_cache(self):
         await self.save()
-        self.sessions._redis.values.clear()
-        self.sessions._redis.index.clear()
         sid, recovered = await self.sessions.resume_or_create("sid", 11, "tenant")
         self.assertEqual(sid, "sid")
         self.assertEqual(recovered.messages[0]["content"], "original")
         self.assertEqual(recovered.state["persistence_mode"], "durable")
-        self.assertIn("nexusmind:session:sid", self.sessions._redis.values)
-        self.sessions._redis.index.clear()
+        self.assertFalse(hasattr(self.sessions, '_redis'))
         self.assertEqual([s["session_id"] for s in await self.sessions.list_sessions(11, tenant_id="tenant")], ["sid"])
 
     async def test_tenant_owner_and_tombstone_survive_cache_loss(self):
         await self.save()
-        self.sessions._redis.values.clear()
         self.assertIsNone(await self.sessions.resume_session("sid", 12, "tenant"))
         self.assertIsNone(await self.sessions.resume_session("sid", 11, "other"))
         self.assertEqual(await self.sessions.list_sessions(11, tenant_id="other"), [])
@@ -162,24 +127,22 @@ class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.graph_manager.saver, "aput", AsyncMock(side_effect=RuntimeError("disk failed"))):
             with self.assertRaisesRegex(RuntimeError, "disk failed"):
                 await self.save()
-        self.assertNotIn("nexusmind:session:sid", self.sessions._redis.values)
+        self.assertIsNone(await self.graph_manager.load_session_snapshot(checkpoint_thread_id('sid', 11, 'tenant')))
 
-    async def test_required_default_and_explicit_cache_only(self):
+    async def test_missing_saver_fails_even_with_legacy_opt_out(self):
         self.graph_manager.saver = None
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SESSION_PERSISTENCE_REQUIRED", None)
             with self.assertRaisesRegex(RuntimeError, "checkpointer"):
                 await self.save()
         with patch.dict(os.environ, {"SESSION_PERSISTENCE_REQUIRED": "false"}):
-            self.assertTrue(await self.save())
-            snapshot = await self.sessions.resume_session("sid", 11, "tenant")
-            self.assertEqual(snapshot.state["persistence_mode"], "cache_only")
+            with self.assertRaisesRegex(RuntimeError, "checkpointer"):
+                await self.save()
 
-    async def test_durable_state_wins_over_stale_cache(self):
+    async def test_updated_durable_state_is_read_directly(self):
         await self.save({"run_status": "running"})
-        with patch.object(self.sessions, "_cache_snapshot", AsyncMock(side_effect=ConnectionError("redis down"))):
-            await self.save({"run_status": "completed"})
-            snapshot = await self.sessions.resume_session("sid", 11, "tenant")
+        await self.save({"run_status": "completed"})
+        snapshot = await self.sessions.resume_session("sid", 11, "tenant")
         self.assertEqual(snapshot.state["run_status"], "completed")
 
     async def test_checkpoint_read_uses_aget_tuple_not_saver_aget_state(self):
@@ -216,7 +179,6 @@ class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
         await graph.ainvoke({"query": "original", "messages": []}, config, durability="sync")
         await self.save({"run_status": "interrupted", "active_run_id": "run1", "active_query": "original",
                          "active_thread_id": run_thread, "active_checkpoint_ns": "", "recoverable": True})
-        self.sessions._redis.values.clear()
         orchestrator = object.__new__(Orchestrator)
         orchestrator._graph = graph
         status = await orchestrator.execution_status("sid", 11, "tenant")
@@ -269,7 +231,6 @@ class DurableSessionTests(unittest.IsolatedAsyncioTestCase):
         # the previous run's compressed window on the second invocation.
         self.assertEqual(first["messages"], window)
         self.assertEqual(second["messages"], window)
-        self.sessions._redis.values.clear()
         snapshot = await self.sessions.resume_session("sid", 11, "tenant")
         self.assertEqual(snapshot.messages[:2], original)
         self.assertEqual([m["content"] for m in snapshot.messages[2:]], ["query", "answer", "next query", "answer"])

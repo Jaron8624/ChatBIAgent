@@ -82,8 +82,6 @@ python-dotenv==1.2.2
 python-multipart==0.0.22
 python-ulid==3.1.0
 PyYAML==6.0.3
-redis==7.4.0
-redisvl==0.16.0
 referencing==0.37.0
 regex==2026.3.32
 requests==2.33.1

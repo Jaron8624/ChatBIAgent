@@ -32,7 +32,8 @@ def checkpoint_run_thread_id(thread_id: str, run_id: str) -> str:
 
 
 def session_persistence_required() -> bool:
-    return os.getenv("SESSION_PERSISTENCE_REQUIRED", "true").lower() not in {"0", "false", "no"}
+    """Authenticated sessions always require durable storage, including development."""
+    return True
 
 
 class GraphCheckpointBusy(RuntimeError):

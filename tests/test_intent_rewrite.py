@@ -315,14 +315,14 @@ class IntentRoutingTests(unittest.TestCase):
             "nl_compile",
         )
 
-    def test_cross_module_query_reaches_coordinator_before_compile(self):
+    def test_explicit_cross_module_sequence_preserves_order(self):
         orchestrator = self._orchestrator()
         self.assertEqual(
             orchestrator._route_decision({
                 "intent": "data_query",
                 "query": "查一下订单量，然后看看订单表有哪些字段",
             }),
-            "coordinate",
+            "react",
         )
 
     def test_multi_analysis_query_reaches_react_before_compile(self):

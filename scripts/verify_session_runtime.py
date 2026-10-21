@@ -1,7 +1,7 @@
-"""Verify durable sessions using real PostgreSQL, Redis and LangGraph.
+"""Verify durable sessions using real PostgreSQL and LangGraph, without a cache.
 
 Creates a separate PostgreSQL schema and synthetic session IDs. Never clears
-production Redis or tables. Credentials are loaded locally and never reported.
+production tables. Credentials are loaded locally and never reported.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import os
 import subprocess
 import sys
 import uuid
-import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -28,7 +27,6 @@ load_dotenv(ROOT / ".env")
 import asyncpg
 from cryptography.fernet import Fernet
 from psycopg.conninfo import make_conninfo
-from redis.asyncio import Redis
 from langgraph.graph import StateGraph, START, END
 from infra import graph_checkpointer as checkpoints
 from infra import postgresql_client as postgres
@@ -47,9 +45,13 @@ async def main():
     schema = "session_check_" + run_id.lower()
     folder = ROOT / "artifacts" / "session_runtime" / run_id
     folder.mkdir(parents=True, exist_ok=False)
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        commit = os.getenv('SOURCE_REVISION') or None  # Runtime images need not contain Git.
     report = {"run_id": run_id, "schema": schema, "checks": [], "status": "running",
-              "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-              "evidence": "real PostgreSQL, Redis, encrypted PostgresSaver and LangGraph; synthetic messages; no model accuracy claim"}
+              "git_commit": commit,
+              "evidence": "real PostgreSQL, encrypted PostgresSaver and LangGraph, no cache; synthetic messages; no model accuracy claim"}
 
     def check(name, ok):
         report["checks"].append({"name": name, "passed": bool(ok)})
@@ -68,13 +70,13 @@ async def main():
             session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
             tenant_id TEXT NOT NULL, status TEXT NOT NULL,
             updated_at TIMESTAMPTZ DEFAULT NOW(), deleted_at TIMESTAMPTZ)""")
+        await conn.execute('''CREATE TABLE users (user_id INTEGER PRIMARY KEY,
+            user_profile TEXT, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)''')
     pg = object.__new__(postgres.PostgreSQLParentClient)
     pg.pool = pool
     graph_manager = checkpoints.GraphCheckpointerManager()
-    redis = Redis.from_url(os.environ["REDIS_URL"], decode_responses=False)
     session = object.__new__(SessionManager)
     session._initialized = True
-    session._redis = redis
     sid = "sess_918201_" + uuid.uuid4().hex[:8]
     owner, tenant = 918201, "runtime-test"
     test_key = Fernet.generate_key().decode("ascii")
@@ -84,47 +86,28 @@ async def main():
 
     try:
         with patch.dict(os.environ, {"GRAPH_CHECKPOINT_FERNET_KEY": test_key,
-                                     "SESSION_PERSISTENCE_REQUIRED": "true"}):
+                                     "GRAPH_CHECKPOINT_IDENTITY_KEY": test_key,
+                                     "GRAPH_CHECKPOINT_PREVIOUS_KEYS": "",
+                                     "NEXUSMIND_SCHEMA_BOOTSTRAP": "true"}):
             await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
             with patch.object(checkpoints, "_manager", graph_manager), \
                  patch.object(postgres, "get_postgresql_client", get_pg):
+                check('profile_write_without_cache', await pg.update_user_profile(owner, 'weekly'))
+                check('profile_read_without_cache', await pg.get_user_profile(owner) == 'weekly')
+                check('profile_update_without_stale_copy', await pg.update_user_profile(owner, 'monthly')
+                      and await pg.get_user_profile(owner) == 'monthly')
+                check('profile_owner_isolation', await pg.get_user_profile(owner + 1) is None)
                 messages = [{"role": "user", "content": "今年华东销售额"},
                             {"role": "assistant", "content": "测试结果 123"}]
                 check("durable_save", await session.save_session(sid, owner, messages, tenant_id=tenant))
-                await redis.delete(f"nexusmind:session:{sid}")
                 recovered_id, recovered = await session.resume_or_create(sid, owner, tenant)
-                check("cache_miss_preserves_session_and_history",
+                check("postgres_preserves_session_and_history",
                       recovered_id == sid and recovered is not None and recovered.messages == messages)
-                check("cache_rebuilt", bool(await redis.exists(f"nexusmind:session:{sid}")))
-                await redis.expire(f"nexusmind:session:{sid}", 1)
-                await asyncio.sleep(1.2)
-                check("actual_redis_ttl_expired", not await redis.exists(f"nexusmind:session:{sid}"))
-                check("actual_ttl_expiry_recovers_history",
-                      (await session.resume_session(sid, owner, tenant)).messages == messages)
-                await redis.set(f"nexusmind:session:{sid}", zlib.compress(json.dumps({
-                    "session_id": sid, "user_id": owner, "tenant_id": tenant,
-                    "messages": [], "state": {}, "summary": "stale", "token_count": 0,
-                }).encode("utf-8")))
-                check("stale_cache_cannot_override_checkpoint",
-                      (await session.resume_session(sid, owner, tenant)).messages == messages)
-                await redis.delete(f"nexusmind:sessions:{owner}")
-                check("session_list_survives_index_expiry",
+                check("session_has_no_cache_client", not hasattr(session, '_redis'))
+                check("session_list_uses_durable_registry",
                       any(item["session_id"] == sid for item in await session.list_sessions(owner, tenant_id=tenant)))
                 check("cross_tenant_denied", await session.resume_session(sid, owner, "other") is None)
                 check("cross_user_denied", await session.resume_session(sid, owner + 1, tenant) is None)
-                unavailable_redis = Redis.from_url("redis://127.0.0.1:1/0", socket_connect_timeout=0.1)
-                session._redis = unavailable_redis
-                logging.disable(logging.CRITICAL)
-                try:
-                    check("redis_unavailable_durable_write",
-                          await session.save_session(sid, owner, messages, tenant_id=tenant))
-                    check("redis_unavailable_durable_read",
-                          (await session.resume_session(sid, owner, tenant)).messages == messages)
-                finally:
-                    session._redis = redis
-                    logging.disable(logging.NOTSET)
-                    await unavailable_redis.aclose()
-
                 run_id_value = uuid.uuid4().hex
                 thread = checkpoints.checkpoint_thread_id(sid, owner, tenant)
                 run_thread = checkpoints.checkpoint_run_thread_id(thread, run_id_value)
@@ -142,9 +125,8 @@ async def main():
                     state={"run_status": "interrupted", "active_run_id": run_id_value,
                            "active_query": "测试继续执行", "recoverable": True,
                            "active_thread_id": run_thread, "active_checkpoint_ns": ""}, tenant_id=tenant)
-                await redis.delete(f"nexusmind:session:{sid}")
                 recovered = await session.resume_session(sid, owner, tenant)
-                check("execution_pointer_survives_cache_expiry",
+                check("execution_pointer_is_durable",
                       recovered is not None and recovered.state["active_run_id"] == run_id_value)
                 snapshot = await graph.aget_state(config)
                 check("real_graph_pending_node", snapshot.next == ("second",))
@@ -177,13 +159,11 @@ async def main():
                     and evidence["tool_calls"][0]["args"] == {"day": "yesterday"})
                 await session.save_session(sid, owner, messages, state={"last_execution_evidence": {
                     "react_result": {"tool_calls": evidence["tool_calls"]}}}, tenant_id=tenant)
-                await redis.delete(f"nexusmind:session:{sid}")
-                check("tool_evidence_survives_redis_expiry", (await session.resume_session(sid, owner, tenant))
+                check("tool_evidence_is_durable", (await session.resume_session(sid, owner, tenant))
                     .state["last_execution_evidence"]["react_result"]["tool_calls"][0]["result"] == raw_result)
 
                 await graph_manager.close()
                 await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
-                await redis.delete(f"nexusmind:session:{sid}")
                 check("connection_restart_recovers_durable_history",
                       (await session.resume_session(sid, owner, tenant)).messages == messages)
                 check("tool_evidence_survives_connection_restart",
@@ -205,7 +185,6 @@ async def main():
                     "GRAPH_CHECKPOINT_FERNET_KEY": rotated_key,
                     "GRAPH_CHECKPOINT_PREVIOUS_KEYS": test_key}):
                     await graph_manager.initialize(make_conninfo(dsn, options=f"-c search_path={schema}"))
-                    await redis.delete(f"nexusmind:session:{sid}")
                     check("key_rotation_preserves_thread_identity",
                           checkpoints.checkpoint_thread_id(sid, owner, tenant) == thread)
                     check("new_keyring_reads_old_durable_evidence",
@@ -222,7 +201,6 @@ async def main():
 
                 await pg.mark_session_deleted(sid, owner, tenant)
                 await graph_manager.delete_thread(thread)
-                await redis.delete(f"nexusmind:session:{sid}")
                 check("deleted_session_does_not_resurrect", await session.resume_session(sid, owner, tenant) is None)
                 check("deleted_session_cannot_write", not await session.save_session(sid, owner, messages, tenant_id=tenant))
                 check("deleted_session_tool_evidence_removed", await load_evidence() is None)
@@ -237,9 +215,6 @@ async def main():
                          ROOT / "backend/infra/graph_checkpointer.py", ROOT / "backend/core/orchestrator.py",
                          ROOT / "backend/core/react_agent.py", ROOT / "backend/tools/mcp_protocol.py")}
         (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        await redis.delete(f"nexusmind:session:{sid}")
-        await redis.zrem(f"nexusmind:sessions:{owner}", sid)
-        await redis.aclose()
         await graph_manager.close()
         await pool.close()
         # This exact schema was generated and created by this invocation only.
