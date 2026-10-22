@@ -40,6 +40,7 @@ class ToolDefinition:
     handler: Optional[Callable] = None
     category: str = "general"
     side_effect: str = "unknown"
+    server_context: bool = False
 
 
 # ==================== MCP Server ====================
@@ -121,7 +122,7 @@ class MCPToolServer:
             }
 
         try:
-            if name in {"search_knowledge_base", "get_memory"}:
+            if name in {"search_knowledge_base", "get_memory"} and not tool.server_context:
                 from core.context_store import require_tool_identity
                 owner, tenant, _ = require_tool_identity()
                 arguments = dict(arguments)

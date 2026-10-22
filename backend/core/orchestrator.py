@@ -45,6 +45,7 @@ load_dotenv()
 
 
 class AgentState(TypedDict):
+    knowledge_base_id: str
     business_domain: str
     policy_hash: str
     governed_rules_ids: List[str]
@@ -87,25 +88,21 @@ class AgentState(TypedDict):
     answer_buffered: bool
 
 
-# ==================== LangChain 工具调用辅助 ====================
-def _make_runtime(context):
-    """构造模拟的 ToolRuntime 上下文（供 LangChain @tool 工具函数使用）"""
-    return type("Runtime", (), {"context": context})()
+from tools.execution import ToolContext, execute_retrieval, retrieval_scope, register_retrieval_tools
 
+def _retrieval_context(state, top_k=5):
+    """Framework boundary: attach graph progress writer to a plain context."""
+    from langgraph.config import get_stream_writer
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        writer = lambda _: None
+    return ToolContext(
+        user_id=state["user_id"], tenant_id=state.get("tenant_id", "default"),
+        session_id=state.get("session_id", ""),
+        knowledge_base_id=state.get("knowledge_base_id") or "默认知识库",
+        top_k=top_k, writer=writer)
 
-async def _invoke_raw_tool(tool, **kwargs):
-    """
-    直接调用 LangChain @tool 装饰器的原始协程函数。
-
-    StructuredTool 对象不能直接 await：
-    - 其 `.coroutine` 属性持有原始 async 函数
-    - runtime 参数需手动构造注入
-    """
-    fn = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
-    if fn is None:
-        # 兜底：走 StructuredTool 自带的 invoke
-        return await tool.ainvoke(kwargs)
-    return await fn(**kwargs)
 
 
 # ==================== 各子 Agent ====================
@@ -119,26 +116,18 @@ class RAGAgent:
         )
 
     async def process(self, state: AgentState) -> Dict[str, Any]:
-        from tools.tools import search_knowledge_base
-        from infra.schemas import ContextSchema
 
         query = state.get("rewritten_query", state["query"])
         user_id = state["user_id"]
         knowledge_base_id = state.get("knowledge_base_id", "默认知识库")
 
         try:
-            # 调用现有 RAG 工具（通过原始协程函数 + 模拟 runtime）
-            from tools.tools import search_knowledge_base
-            result = await _invoke_raw_tool(
-                search_knowledge_base,
+            # Shared validated retrieval service, with server-owned context.
+
+            result = await execute_retrieval(
+                "search_knowledge_base",
                 query=query,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    knowledge_base_id=knowledge_base_id,
-                    top_k=5,
-                    tenant_id=state.get("tenant_id", "default"),
-                    session_id=state.get("session_id", ""),
-                )),
+                context=_retrieval_context(state, top_k=5),
             )
             return {"rag_result": result}
         except Exception as e:
@@ -163,22 +152,16 @@ class MemoryAgent:
         user_id = state["user_id"]
 
         try:
-            # 调用现有记忆工具（通过原始协程函数 + 模拟 runtime）
-            from infra.schemas import ContextSchema
-            from tools.tools import get_memory
-            result = await _invoke_raw_tool(
-                get_memory,
+            # Shared validated retrieval service, with server-owned context.
+
+
+            result = await execute_retrieval(
+                "get_memory",
                 query=query,
                 semantic_k=3,
                 episodic_k=2,
                 procedural_k=1,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    knowledge_base_id="默认知识库",
-                    top_k=5,
-                    tenant_id=state.get("tenant_id", "default"),
-                    session_id=state.get("session_id", ""),
-                )),
+                context=_retrieval_context(state, top_k=5),
             )
             return {"memory_result": result}
         except Exception as e:
@@ -200,8 +183,6 @@ class ExploreAgent:
 
     async def process(self, state: AgentState) -> Dict[str, Any]:
         """广泛检索：知识库 + 记忆 + 外部 MCP 工具"""
-        from tools.tools import search_knowledge_base, get_memory
-        from infra.schemas import ContextSchema
 
         query = state.get("rewritten_query", state["query"])
         user_id = state["user_id"]
@@ -210,16 +191,10 @@ class ExploreAgent:
         parts = []
         # 1. 知识库检索（放宽 top_k）
         try:
-            kb = await _invoke_raw_tool(
-                search_knowledge_base,
+            kb = await execute_retrieval(
+                "search_knowledge_base",
                 query=query,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    knowledge_base_id=knowledge_base_id,
-                    top_k=10,
-                    tenant_id=state.get("tenant_id", "default"),
-                    session_id=state.get("session_id", ""),
-                )),
+                context=_retrieval_context(state, top_k=10),
             )
             if kb and kb != "未检索到相关文档":
                 parts.append(f"【知识库】\n{kb}")
@@ -228,19 +203,13 @@ class ExploreAgent:
 
         # 2. 记忆检索
         try:
-            mem = await _invoke_raw_tool(
-                get_memory,
+            mem = await execute_retrieval(
+                "get_memory",
                 query=query,
                 semantic_k=5,
                 episodic_k=3,
                 procedural_k=2,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    knowledge_base_id="默认知识库",
-                    top_k=5,
-                    tenant_id=state.get("tenant_id", "default"),
-                    session_id=state.get("session_id", ""),
-                )),
+                context=_retrieval_context(state, top_k=5),
             )
             if mem:
                 parts.append(f"【记忆】\n{mem}")
@@ -405,93 +374,8 @@ class Orchestrator:
         self._register_mcp_tools()
 
     def _register_mcp_tools(self):
-        """将现有工具注册到 MCP Server
-
-        注意：LangChain @tool 装饰后是 StructuredTool 对象，
-        不能直接作为 MCP handler（缺少 runtime 注入），
-        因此注册包装协程，内部通过 _invoke_raw_tool 调用原始函数。
-        """
-        from tools.tools import search_knowledge_base, get_memory
-
-        async def _kb_search_handler(
-            query: str,
-            user_id: int = 0,
-            tenant_id: str = "default",
-            knowledge_base_id: str = "默认知识库",
-            top_k: int = 5,
-        ) -> str:
-            from infra.schemas import ContextSchema
-            return await _invoke_raw_tool(
-                search_knowledge_base,
-                query=query,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    knowledge_base_id=knowledge_base_id,
-                    top_k=top_k,
-                )),
-            )
-
-        async def _memory_handler(
-            query: str,
-            user_id: int = 0,
-            tenant_id: str = "default",
-            semantic_k: int = 3,
-            episodic_k: int = 2,
-            procedural_k: int = 1,
-        ) -> str:
-            from infra.schemas import ContextSchema
-            return await _invoke_raw_tool(
-                get_memory,
-                query=query,
-                semantic_k=semantic_k,
-                episodic_k=episodic_k,
-                procedural_k=procedural_k,
-                runtime=_make_runtime(ContextSchema(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    knowledge_base_id="默认知识库",
-                    top_k=5,
-                )),
-            )
-
-        from tools.mcp_protocol import ToolDefinition
-
-        self.mcp_server.register_tool(ToolDefinition(
-            name="search_knowledge_base",
-            description="从私有知识库检索相关文档和专业知识",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "搜索查询词"},
-                    "user_id": {"type": "integer", "description": "用户ID", "default": 0},
-                    "tenant_id": {"type": "string", "description": "租户标识"},
-                    "knowledge_base_id": {"type": "string", "description": "知识库ID", "default": "默认知识库"},
-                    "top_k": {"type": "integer", "description": "返回文档数", "default": 5},
-                },
-                "required": ["query"],
-            },
-            handler=_kb_search_handler,
-            category="knowledge",
-        ))
-        self.mcp_server.register_tool(ToolDefinition(
-            name="get_memory",
-            description="检索用户长期记忆，用于个性化回答",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "记忆查询词"},
-                    "user_id": {"type": "integer", "description": "用户ID", "default": 0},
-                    "tenant_id": {"type": "string", "description": "租户标识"},
-                    "semantic_k": {"type": "integer", "description": "语义记忆召回数量", "default": 3},
-                    "episodic_k": {"type": "integer", "description": "情节记忆召回数量", "default": 2},
-                    "procedural_k": {"type": "integer", "description": "程序记忆召回数量", "default": 1},
-                },
-                "required": ["query"],
-            },
-            handler=_memory_handler,
-            category="memory",
-        ))
+        """Register protocol adapters over the shared retrieval execution service."""
+        register_retrieval_tools(self.mcp_server)
 
         # 注册 SQL 数据分析工具集（ChatBI：schema 查询 + SQL 执行）
         from memory.store_api import register_memory_store_tools
@@ -846,7 +730,13 @@ class Orchestrator:
                         raise PermissionError('resumed_rule_no_longer_authorized')
                 if checkpoint.next:
                     from core.context_store import context_identity
-                    with context_identity(user_id, tenant_id, session_id):
+                    from governance.policy import knowledge_base
+                    resumed_kb = (knowledge_base(business, values.get("knowledge_base_id"))
+                                  if business else values.get("knowledge_base_id") or "默认知识库")
+                    if checkpoint.values.get("knowledge_base_id") != resumed_kb:
+                        await graph.aupdate_state(config, {"knowledge_base_id": resumed_kb})
+                    with context_identity(user_id, tenant_id, session_id), retrieval_scope(ToolContext(
+                            user_id, tenant_id, session_id, resumed_kb)):
                         result = await graph.ainvoke(None, config, durability="sync")
                 else:
                     result = dict(checkpoint.values or {})
@@ -1153,36 +1043,22 @@ class Orchestrator:
                 return "\n".join(results) if results else "[未查到数据]"
 
             async def schema_worker(q: str) -> str:
-                from tools.tools import search_knowledge_base
-                from infra.schemas import ContextSchema
-                return await _invoke_raw_tool(
-                    search_knowledge_base,
+
+                return await execute_retrieval(
+                "search_knowledge_base",
                     query=q,
-                    runtime=_make_runtime(ContextSchema(
-                        user_id=user_id,
-                        knowledge_base_id=knowledge_base_id,
-                        top_k=5,
-                        tenant_id=state.get("tenant_id", "default"),
-                        session_id=state.get("session_id", ""),
-                    )),
+                    context=_retrieval_context(state, top_k=5),
                 )
 
             async def memory_worker(q: str) -> str:
-                from tools.tools import get_memory
-                from infra.schemas import ContextSchema
-                return await _invoke_raw_tool(
-                    get_memory,
+
+                return await execute_retrieval(
+                "get_memory",
                     query=q,
                     semantic_k=3,
                     episodic_k=2,
                     procedural_k=1,
-                    runtime=_make_runtime(ContextSchema(
-                        user_id=user_id,
-                        knowledge_base_id="默认知识库",
-                        top_k=5,
-                        tenant_id=state.get("tenant_id", "default"),
-                        session_id=state.get("session_id", ""),
-                    )),
+                    context=_retrieval_context(state, top_k=5),
                 )
 
             # ---- Coordinator 拆解 + 并行执行 ----
@@ -2164,7 +2040,8 @@ class Orchestrator:
         async def invoke_graph():
             from core.context_store import context_identity
             from infra.llm_usage import attach_current_usage
-            with context_identity(user_id, tenant_id, resumed_sid):
+            with context_identity(user_id, tenant_id, resumed_sid), retrieval_scope(ToolContext(
+                    user_id, tenant_id, resumed_sid, knowledge_base_id or "默认知识库")):
                 if graph_config is None:
                     result = await graph.ainvoke(initial_state)
                 else:
