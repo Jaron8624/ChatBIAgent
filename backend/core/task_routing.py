@@ -35,3 +35,15 @@ def describe_task(query):
 def requires_loop(query):
     plan = describe_task(query)
     return len(plan.steps) > 1
+
+
+def plan_only(query):
+    """A ban on refunds/writes does not ban the requested read-only analysis."""
+    clauses = re.split(r'[，,。；;\n]', str(query or ''))
+    for clause in clauses:
+        clause = clause.strip()
+        if re.search(r'^(?:请)?(?:只(?:要|需|做|生成|提供|给出)|仅(?:需|要|生成|提供|给出)?).{0,20}(?:计划|方案|步骤)', clause):
+            return True
+        if re.fullmatch(r'(?:请)?(?:先|暂时)?(?:不要|暂不|无需|不必)(?:实际)?(?:执行|运行|查询)(?:任何操作|任何任务|任何SQL|SQL|查询|数据库)?[！! ]*', clause, re.I):
+            return True
+    return False

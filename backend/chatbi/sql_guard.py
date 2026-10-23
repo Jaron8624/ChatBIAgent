@@ -272,10 +272,11 @@ class SQLGuardPipeline:
                 result.warnings = [f"SQL 执行失败（自修复未成功）: {error_msg}"]
                 return result
 
-            # 4. 成功：合理性检查。空结果 / 明确 TopN 却无 LIMIT 视为可修复结果失败，
+            # 4. 成功：合理性检查。明确 TopN 却无 LIMIT 可修复；空结果仅作提示，
             # 把执行反馈回送模型；NULL/比率告警保留给上层人工解释，不盲改口径。
             warnings = self.checker.check(payload.get("columns", []), payload.get("rows", []), current_sql, query)
-            repairable = [w for w in warnings if w.startswith("查询结果为空") or "TopN 但 SQL 未加 LIMIT" in w]
+            # A valid empty result is evidence, not permission to change filters.
+            repairable = [w for w in warnings if "TopN 但 SQL 未加 LIMIT" in w]
             if repairable and round_no < self.max_repair_rounds:
                 diagnosis = "结果合理性检查失败: " + "; ".join(repairable)
                 result.repair_history.append(f"[round {round_no}] {diagnosis}")
@@ -321,4 +322,5 @@ def register_sql_guard_tools(mcp_server) -> None:
         },
         handler=_execute_sql_guarded,
         category="database",
+        side_effect="read_only",
     ))

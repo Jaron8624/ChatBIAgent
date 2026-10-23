@@ -649,6 +649,28 @@ class MetricPlanCompiler:
         return errors
 
 
+def get_query_metric_context(query: str) -> str:
+    """Give the general executor the same governed metric basis as compilation.
+
+    Only relevant metrics are supplied. This is server-owned metadata, not
+    retrieved instructions, and does not replace domain authorization/SQL Guard.
+    """
+    lines = []
+    for name in match_metrics_by_query(query):
+        metric = ALL_METRICS.get(name)
+        if metric is None:
+            continue
+        lines.append(f"- {name}（{metric.display_name}）: {metric.description}; "
+                     f"表={metric.table}; 聚合={metric.aggregation}; "
+                     f"字段={metric.measure_column or '见指标说明'}; "
+                     f"默认过滤={metric.filter_expr or '无，不得自行添加状态过滤'}")
+    if not lines:
+        return ""
+    return ("当前任务的业务指标口径（执行与解释必须一致）：\n" + "\n".join(lines)
+            + "\n不同事实表先按订单聚合再关联，避免明细和支付记录多对多重复计数。"
+            + "\n销售额和支付金额不是同一个指标。未指定的日期、状态和业务筛选不能自行补充。")
+
+
 def get_metric_definitions() -> str:
     """返回所有指标定义的描述文本（供 LLM prompt 使用）"""
     lines = ["【语义层指标定义】"]

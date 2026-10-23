@@ -34,7 +34,7 @@ from tools.mcp_protocol import MCPToolServer, MCPToolRouter
 from evaluation.monitor import Monitor
 from core.react_agent import ReActAgent, ToolEvidencePersistenceError, ToolExecutionUncertain
 from core import collaboration
-from core.task_routing import describe_task, requires_loop
+from core.task_routing import describe_task, requires_loop, plan_only
 from core.execution_policy import enabled, scalar_count_request, verified_count_answer, review_before_publish
 from infra.tracing import current_trace, traced_operation, traced_await
 from governance.context import current as current_business_context
@@ -937,6 +937,7 @@ class Orchestrator:
                     load_progress=load_progress if execution_thread and manager.saver else None,
                     save_progress=save_progress if execution_thread and manager.saver else None)
             if react_result is None:
+                from chatbi.semantic_layer import get_query_metric_context
                 react_result = await self.react_agent.run(
                 query=state["query"],
                 tools=tool_defs,
@@ -948,10 +949,12 @@ class Orchestrator:
                 evidence_index=json.dumps([{"call_id": item.get("call_id"), "tool": item.get("tool"),
                     "args": item.get("args"), "queried_at": item.get("finished_at")}
                     for item in previous], ensure_ascii=False) if previous else "",
+                plan_steps=state.get("plan_steps") or list(describe_task(state["query"]).steps),
+                metric_context=get_query_metric_context(state["query"]),
             )
             latency = (time.time() - start) * 1000
             self.monitor.record("react_loop", latency,
-                                react_result.get("termination_reason") != "parse_error", tokens=0)
+                                react_result.get("termination_reason") not in {"parse_error", "no_progress", "max_iterations"}, tokens=0)
 
             # ReAct 的 answer 作为最终回答，工具链转为 mcp_results 供
             # synthesize 展示来源与评测提取 called_tools
@@ -1575,11 +1578,17 @@ class Orchestrator:
 
         query = state.get('rewritten_query') or state.get('query','')
         task = describe_task(query)
-        plan_only = bool(re.search(r'只(?:要|需).*(?:计划|方案)|不要执行|仅.*(?:计划|步骤)', query))
-        if plan_only:
+        describe_only = plan_only(query)
+        if describe_only:
             return 'plan'
-        if len(task.steps)>1 and not plan_only and intent not in {'greeting','chitchat','safety_review'}:
+        if len(task.steps)>1 and intent not in {'greeting','chitchat','safety_review'}:
             return 'react' if task.dependency=='sequential' else 'coordinate'
+        if intent == 'complex_task':
+            # Plan only when explicitly requested; otherwise reuse the task
+            # structure in ReAct instead of paying for a discarded second plan.
+            if re.search(r'(?:制定|生成|设计|列出).{0,8}(?:执行计划|查询计划|分析计划|步骤计划)', query):
+                return 'plan'
+            return 'react'
 
         # 数据分析意图：复合诉求先交给 Coordinator/ReAct，单一问题走确定性语义编译。
         if intent in ("data_query", "trend_analysis", "comparison", "report_request"):
@@ -1625,7 +1634,7 @@ class Orchestrator:
     def _plan_decision(state):
         import re
         query=state.get('query','')
-        if re.search(r'只(?:要|需).*(?:计划|方案)|不要执行|仅.*(?:计划|步骤)',query):
+        if plan_only(query):
             return 'describe'
         if state.get('intent')=='complex_task' or requires_loop(query):
             return 'execute'
